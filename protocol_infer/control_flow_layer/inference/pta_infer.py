@@ -55,8 +55,8 @@ class PTAInfer(FSMInfer):
                     fsm._by_state_input.setdefault(key, []).append(tran)
 
                     # 更新前驱后继
-                    fsm.states[current].next_states[symbol] = fsm.states[dst]
-                    fsm.states[dst].prev_states[symbol] = fsm.states[current]
+                    fsm.states[current].next_states[symbol] = dst
+                    fsm.states[dst].prev_states[symbol] = current
                     fsm.states[current].add_transition(tran)
 
                 current = dst
@@ -67,5 +67,11 @@ class PTAInfer(FSMInfer):
 
             # mark accepting (end) state for this sequence
             fsm.states[current].is_end = True
+            print(f"[PTA] session={session_key} end_state={current}")
 
+            print("check end_states:")
+            for sid, s in fsm.states.items():
+                if s.is_end:
+                    print("end_state:", sid)
+            
         return fsm

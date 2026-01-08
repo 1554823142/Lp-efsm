@@ -7,12 +7,14 @@ from protocol_infer.control_flow_layer.inference.pta_infer import PTAInfer
 from protocol_infer.core.datamodel.trace import Trace
 from protocol_infer.core.datamodel.session import SessionKey
 from protocol_infer.core.model.fsm import FSM
+from protocol_infer.algorithm.states_merging.K_tails import KTailStateMerger
 
 class ControlFlowPipeline:
-    def __init__(self, n_clusters: int = 8):
+    def __init__(self, n_clusters: int = 8, k: int = 4):
         self.featureer = ControlFeatureExtraction()
         self.abstractor = ClusterMessageAbstractor(KMeansClustering(n_clusters=n_clusters))
         self.inferer = PTAInfer()
+        self.merger = KTailStateMerger(k)
 
     def run_from_pcap(self, pcap_path: str) -> FSM:
         trace = PCAPPipeline().run(pcap_path)
@@ -47,4 +49,8 @@ class ControlFlowPipeline:
 
         # infer FSM
         fsm = self.inferer.infer(sequences)
+        print(fsm)
+        # merge FSM
+        fsm = self.merger.merge(fsm)
+        
         return fsm
