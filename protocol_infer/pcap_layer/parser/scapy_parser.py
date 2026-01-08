@@ -1,6 +1,6 @@
 from typing import Iterable
-from core.interface.pcap_analysis import PCAPParser
-from core.datamodel.raw_packet import Rawpacket
+from protocol_infer.core.interface.pcap_analysis import PCAPParser
+from protocol_infer.core.datamodel.raw_packet import Rawpacket
 from scapy.all import rdpcap, PcapReader
 from scapy.layers.inet import IP, TCP, UDP, ICMP
 

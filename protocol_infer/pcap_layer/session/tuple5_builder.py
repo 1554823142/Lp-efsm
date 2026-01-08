@@ -1,6 +1,6 @@
 from typing import Iterable, List
-from core.interface.pcap_analysis import SessionBuilder
-from core.datamodel.session import Session, SessionKey
+from protocol_infer.core.interface.pcap_analysis import SessionBuilder
+from protocol_infer.core.datamodel.session import Session, SessionKey
 from protocol_infer.core.datamodel.raw_packet import Rawpacket
 from collections import defaultdict
 

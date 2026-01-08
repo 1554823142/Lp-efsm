@@ -1,8 +1,8 @@
 from typing import List
-from core.datamodel.trace import Trace
-from pcap_layer.parser.scapy_parser import ScapyParser
-from pcap_layer.session.tuple5_builder import FiveTupleBuilder
-from pcap_layer.segmentation.packet_level import PacketLevelSegmenter
+from protocol_infer.core.datamodel.trace import Trace
+from protocol_infer.pcap_layer.parser.scapy_parser import ScapyParser
+from protocol_infer.pcap_layer.session.tuple5_builder import FiveTupleBuilder
+from protocol_infer.pcap_layer.segmentation.packet_level import PacketLevelSegmenter
 
 
 class PCAPPipeline:

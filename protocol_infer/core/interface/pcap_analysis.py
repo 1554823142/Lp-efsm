@@ -1,8 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Iterable, List
-from core.datamodel.raw_packet import Rawpacket
-from core.datamodel.session import Session
-from core.datamodel.event import MessageEvent
+from protocol_infer.core.datamodel.raw_packet import Rawpacket
+from protocol_infer.core.datamodel.session import Session
+from protocol_infer.core.datamodel.event import MessageEvent
 
 class PCAPParser(ABC):
 

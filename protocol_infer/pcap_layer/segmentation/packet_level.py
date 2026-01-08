@@ -1,5 +1,5 @@
-from core.interface.pcap_analysis import Segmenter
-from core.datamodel.event import MessageEvent, Direction
+from protocol_infer.core.interface.pcap_analysis import Segmenter
+from protocol_infer.core.datamodel.event import MessageEvent, Direction
 
 class PacketLevelSegmenter(Segmenter):
 

@@ -8,8 +8,16 @@ class ControlFeatureExtraction(FeatureExtractor):
 
         for event in trace:
             # 暂时考虑: 负载量, 端口号, 方向
+
+
+            # 处理 payload
+            if event.payload and len(event.payload) > 0:
+                payload_value = float(len(event.payload))  # 使用长度而不是内容
+            else:
+                payload_value = 0.0  # 空负载设为0
+           
             vec = [
-                float(event.payload),
+                float(payload_value),
                 float(event.session_key.port1),
                 float(event.session_key.port2),
                 float(event.direction.to_feature()),
