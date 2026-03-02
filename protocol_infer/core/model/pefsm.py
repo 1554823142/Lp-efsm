@@ -1,4 +1,4 @@
-from model.efsm import EFSM
+from protocol_infer.core.model.efsm import EFSM
 
 class PEFSM(EFSM):
     pass

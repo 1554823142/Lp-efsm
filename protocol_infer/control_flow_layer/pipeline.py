@@ -1,4 +1,5 @@
 from collections import defaultdict
+from typing import Dict, List
 from protocol_infer.pcap_layer.pipeline import PCAPPipeline
 from protocol_infer.control_flow_layer.features.control_feature_extraction import ControlFeatureExtraction
 from protocol_infer.control_flow_layer.abstraction.clustering_abstraction import ClusterMessageAbstractor
@@ -15,6 +16,9 @@ class ControlFlowPipeline:
         self.abstractor = ClusterMessageAbstractor(KMeansClustering(n_clusters=n_clusters))
         self.inferer = PTAInfer()
         self.merger = KTailStateMerger(k)
+        
+        # 缓存sessions，供其他层使用
+        self._sessions: Dict[SessionKey, List] = None
 
     def run_from_pcap(self, pcap_path: str) -> FSM:
         trace = PCAPPipeline().run(pcap_path)
@@ -25,6 +29,13 @@ class ControlFlowPipeline:
         sessions = defaultdict(list)
         for ev in trace.events:
             sessions[ev.session_key].append(ev)     # 将事件按照session_key分桶  session_key -> [事件]
+        
+        # 为每个会话排序事件
+        for sk, events in sessions.items():
+            events.sort(key=lambda e: e.timestamp)
+        
+        # 缓存sessions供其他层使用
+        self._sessions = dict(sessions)
 
         # sort and extract features per event and collect all features
         all_features = []
@@ -44,13 +55,20 @@ class ControlFlowPipeline:
         sequences = {}
         for sk, (events, features) in sess_features.items():
             symbols = [self.abstractor.abstract(f) for f in features]
-            print(symbols)
             sequences[sk] = symbols
 
         # infer FSM
         fsm = self.inferer.infer(sequences)
-        print(fsm)
-        # merge FSM
         fsm = self.merger.merge(fsm)
+        print(fsm)
         
         return fsm
+    
+    def get_sessions(self) -> Dict[SessionKey, List]:
+        """
+        获取处理后的sessions，供其他层使用
+        
+        Returns:
+            按session_key分组的events字典，如果还没有运行过run方法则返回None
+        """
+        return self._sessions
