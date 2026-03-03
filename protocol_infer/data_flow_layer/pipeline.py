@@ -52,6 +52,7 @@ class DataFlowPipeline:
         trace: Trace,
         fsm: FSM,
         sessions: Optional[Dict[SessionKey, List]] = None,
+        precomputed_sess_features: Optional[Dict[SessionKey, tuple]] = None,
     ) -> EFSM:
         """
         从 Trace(增强版) + FSM 构建 EFSM。
@@ -67,23 +68,39 @@ class DataFlowPipeline:
 
         # 2) 抽象消息（写入 trace.abstract_messages）
         # 若提供了已训练的抽象器与其对应的特征提取器，则复用以保证符号与FSM一致
-        if self.abstraction_processor.abstractor is not None and self.symbol_featureer is not None:
+        if self.abstraction_processor.abstractor is not None and (self.symbol_featureer is not None or precomputed_sess_features is not None):
             abstract_msgs = []
-            for events in sessions.values():
-                # 使用控制流层的特征提取器生成符号特征
-                symbol_features = self.symbol_featureer.extract(events)
-                for ev, feat in zip(events, symbol_features):
-                    vars_dict = self.feature_processor.extract_vars(ev)
-                    symbol = self.abstraction_processor.abstractor.abstract(feat)
-                    abstract_msgs.append(
-                        AbstractMessage(
-                            session_key=ev.session_key,
-                            timestamp=ev.timestamp,
-                            symbol=symbol,
-                            vars=vars_dict,
-                            direction=ev.direction
+            if precomputed_sess_features is not None:
+                # 直接复用控制流层已计算好的符号特征
+                for events, symbol_features in precomputed_sess_features.values():
+                    for ev, feat in zip(events, symbol_features):
+                        vars_dict = self.feature_processor.extract_vars(ev)
+                        symbol = self.abstraction_processor.abstractor.abstract(feat)
+                        abstract_msgs.append(
+                            AbstractMessage(
+                                session_key=ev.session_key,
+                                timestamp=ev.timestamp,
+                                symbol=symbol,
+                                vars=vars_dict,
+                                direction=ev.direction
+                            )
                         )
-                    )
+            else:
+                for events in sessions.values():
+                    # 使用控制流层的特征提取器生成符号特征
+                    symbol_features = self.symbol_featureer.extract(events)
+                    for ev, feat in zip(events, symbol_features):
+                        vars_dict = self.feature_processor.extract_vars(ev)
+                        symbol = self.abstraction_processor.abstractor.abstract(feat)
+                        abstract_msgs.append(
+                            AbstractMessage(
+                                session_key=ev.session_key,
+                                timestamp=ev.timestamp,
+                                symbol=symbol,
+                                vars=vars_dict,
+                                direction=ev.direction
+                            )
+                        )
             trace.abstract_messages = abstract_msgs
         else:
             trace = self.abstraction_processor.fit_and_abstract(

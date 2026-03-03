@@ -12,6 +12,7 @@ class Transition:
     action: Optional[Callable[[Dict], Dict]] = None
     output: Optional[str] = None
     prob: Optional[float] = None
+    traverse_count: int = 0
 
 
 class FSMState:
@@ -149,21 +150,32 @@ class FSM:
         for k in [k for k in self._by_state_input if k[0] == s2]:
             del self._by_state_input[k]
 
-        # 6. 对合并后 (s1, symbol) 的转移列表去重
+        # 6. 对合并后 (s1, symbol, dst) 的转移进行语义去重
         for key in list(self._by_state_input):
             if key[0] == s1:
-                seen: set = set()
-                self._by_state_input[key] = [
-                    t for t in self._by_state_input[key]
-                    if t.id not in seen and not seen.add(t.id)  # type: ignore
-                ]
-
-        # state1.transitions 同步去重
-        seen = set()
-        state1.transitions = [
-            t for t in state1.transitions
-            if t.id not in seen and not seen.add(t.id)  # type: ignore
-        ]
+                unique_by_dst: Dict[int, Transition] = {}
+                for t in self._by_state_input[key]:
+                    if t.dst not in unique_by_dst:
+                        unique_by_dst[t.dst] = t
+                    else:
+                        unique_by_dst[t.dst].traverse_count += t.traverse_count
+                self._by_state_input[key] = list(unique_by_dst.values())
+        
+        # state1.transitions 同步语义去重
+        unique_pairs: set = set()
+        new_transitions: List[Transition] = []
+        for t in state1.transitions:
+            pair = (t.symbol, t.dst)
+            if pair not in unique_pairs:
+                unique_pairs.add(pair)
+                new_transitions.append(t)
+            else:
+                # 累加频次到已存在的对应项
+                for x in new_transitions:
+                    if x.symbol == t.symbol and x.dst == t.dst:
+                        x.traverse_count += t.traverse_count
+                        break
+        state1.transitions = new_transitions
 
         # 7. 删除 s2
         del self.states[s2]
@@ -192,5 +204,9 @@ class FSM:
             flag_str = f" ({', '.join(flags)})" if flags else ""
             lines.append(f"[{sid}] {state.name}{flag_str}, visits={state.visit_count}")
             for tran in state.transitions:
-                lines.append(f"    --[{tran.symbol}]--> {tran.dst}")
+                freq = tran.traverse_count
+                if freq and freq > 1:
+                    lines.append(f"    --[{tran.symbol}]--> {tran.dst} (x{freq})")
+                else:
+                    lines.append(f"    --[{tran.symbol}]--> {tran.dst}")
         return "\n".join(lines)

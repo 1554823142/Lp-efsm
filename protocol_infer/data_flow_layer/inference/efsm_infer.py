@@ -35,7 +35,14 @@ class EFSMInferencer:
                 candidates = fsm.get_transitions(current_state, symbol)
                 if not candidates:
                     break
-                tran = candidates[0]
+                tran = max(
+                    candidates,
+                    key=lambda t: (
+                        fsm.states.get(t.dst).visit_count
+                        if t.dst in fsm.states
+                        else 0
+                    )
+                )
                 key = (tran.src, tran.symbol)
                 transition_vars[key].append(vars_dict)
                 current_state = tran.dst

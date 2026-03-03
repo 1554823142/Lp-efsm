@@ -37,10 +37,12 @@ class PTAInfer(FSMInfer):
                 if existing:
                     # 转移已存在，PTA 确定性：直接复用
                     dst = existing[0].dst
+                    existing[0].traverse_count += 1
                 else:
                     # 新建状态和转移，统一通过 add_transition 维护所有索引
                     dst = fsm.new_state()
-                    fsm.add_transition(src=current, dst=dst, symbol=symbol)
+                    tran = fsm.add_transition(src=current, dst=dst, symbol=symbol)
+                    tran.traverse_count = 1
 
                 current = dst
 

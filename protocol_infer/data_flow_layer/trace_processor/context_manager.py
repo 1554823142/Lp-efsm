@@ -73,9 +73,9 @@ class SessionContextBuilder:
         avg_interval = sum(intervals) / len(intervals) if intervals else 0.0
         burstiness = self._calculate_burstiness(intervals) if intervals else 0.0
         
-        # 协议指纹
+        # 协议模式识别
         is_request_response = self._is_request_response_pattern(events)
-        is_streaming = self._is_streaming_pattern(events, avg_interval)
+        is_streaming = self._is_streaming_pattern(events, avg_interval) # (平均间隔不小，长度变化大)
         suspected_protocol = self._detect_protocol(events, session_key)
         
         return SessionContext(
@@ -164,17 +164,5 @@ class SessionContextBuilder:
         return False
     
     def _detect_protocol(self, events: List[MessageEvent], session_key: SessionKey) -> str:
-        """基于特征检测协议类型"""
-        # 简单的协议检测逻辑
-        if session_key.protocol == "TCP":
-            if len(events) > 0:
-                first_payload = events[0].payload
-                if len(first_payload) > 0:
-                    # 可以根据端口号或payload特征判断
-                    if session_key.port1 == 80 or session_key.port2 == 80:
-                        return "HTTP"
-                    elif session_key.port1 == 443 or session_key.port2 == 443:
-                        return "HTTPS"
-                    elif session_key.port1 == 502 or session_key.port2 == 502:
-                        return "Modbus"
+        """未知协议场景：不做具体协议命名，统一返回 Unknown"""
         return "Unknown"

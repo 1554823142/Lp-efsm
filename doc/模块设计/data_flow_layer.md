@@ -6,7 +6,7 @@
 
 ## 设计思路
 
-### 得到会话内容指标信息
+### 得到会话上下文
 
 首先得到`SessionContext`, 即记录会话特征的容器, 其数据结构为:
 
@@ -52,6 +52,27 @@ class SessionContext:
 
   请求-响应成功配对比例, 如高的则为典型的请求-响应协议, 低则为流式协议
 
-### 特征提取
+### 构建方法
 
-默认采用Kmeans聚类获取特征, 可以传入其他的聚类模型, 将
+`self.feature_processor.build_session_contexts(trace, sessions)`
+
+得到的效果如下:
+
+```txt
+trace.session_contexts = {
+    SessionKey(src_ip='192.168.1.100', src_port=54321, dst_ip='192.168.1.100', dst_port=21, protocol='TCP'): {
+        'is_client': True,
+        'server_port': 21,
+        'packet_ratio': 4/4 = 1.0,
+        'byte_ratio': 150/120 = 1.25,
+        'avg_message_len': 33.75,
+        'message_len_std': 15.2,
+        'avg_interval': 0.5,
+        'burstiness': 1.2,
+        'is_request_response': True,
+        'is_streaming': False,
+        'suspected_protocol': 'FTP'
+    },
+    .....
+```
+
