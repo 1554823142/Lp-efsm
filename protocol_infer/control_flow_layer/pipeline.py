@@ -54,13 +54,15 @@ class ControlFlowPipeline:
         # build sequences
         sequences = {}
         for sk, (events, features) in sess_features.items():
-            symbols = [self.abstractor.abstract(f) for f in features]
+            symbols = [self.abstractor.abstract(f) for f in features]   # 生成符号序列
             sequences[sk] = symbols
 
         # infer FSM
         fsm = self.inferer.infer(sequences)
+
+        # merge states
         fsm = self.merger.merge(fsm)
-        print(fsm)
+        # print(fsm)
         
         return fsm
     

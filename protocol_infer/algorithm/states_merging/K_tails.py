@@ -39,11 +39,12 @@ class KTailStateMerger(StateMerger):
         '''
         state = fsm.states[sid]                    # 当前状态
 
-        if k == 0:
+        if k == 0:      # 基准情况, 表示终止与非终止不会合并
             return ("END" if state.is_end else "NONEND",)
 
         sig = []
-        for symbol, next_sid in sorted(state.next_states.items()):
+        # 按符号排序, 确保签名的顺序是确定的, 使得相同的状态行为产生完全相同的签名
+        for symbol, next_sid in sorted(state.next_states.items()):  
             sig.append(
                 (symbol, self.signiture_compute(next_sid, k - 1, fsm))
             )
