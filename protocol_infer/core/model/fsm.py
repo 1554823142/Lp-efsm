@@ -238,6 +238,7 @@ class FSM:
         subset_map: Dict[frozenset, int] = {}
         start_is_end = any(self.states[s].is_end for s in start_set)
         start_id = new_fsm.new_state(is_start=True, is_end=start_is_end)
+        new_fsm.states[start_id].visit_count = sum(self.states[s].visit_count for s in start_set if s in self.states)
         subset_map[start_set] = start_id
         queue: List[frozenset] = [start_set]
         while queue:
@@ -257,6 +258,7 @@ class FSM:
                 if target_set not in subset_map:
                     is_end = any(self.states[x].is_end for x in target_set)
                     new_id = new_fsm.new_state(is_end=is_end)
+                    new_fsm.states[new_id].visit_count = sum(self.states[s].visit_count for s in target_set if s in self.states)
                     subset_map[target_set] = new_id
                     queue.append(target_set)
                 tran = new_fsm.add_transition(current_id, subset_map[target_set], sym)

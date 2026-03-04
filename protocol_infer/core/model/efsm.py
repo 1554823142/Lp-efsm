@@ -38,15 +38,16 @@ class EFSM(FSM):
           2. 深拷贝转移，并重建各状态的 transitions 列表和 _by_state_input 索引
         """
         # 1. 升级状态
-        self.states = {
-            sid: EFSMState(
+        self.states = {}
+        for sid, st in base_fsm.states.items():
+            efst = EFSMState(
                 name=st.name,
                 is_start=st.is_start,
                 is_end=st.is_end,
                 variables={}
             )
-            for sid, st in base_fsm.states.items()
-        }
+            efst.visit_count = st.visit_count
+            self.states[sid] = efst
         self.start_state = base_fsm.start_state
         self._next_state_id = base_fsm._next_state_id
 
