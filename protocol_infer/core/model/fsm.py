@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Tuple, Optional
+from collections import deque
 
 
 @dataclass
@@ -231,34 +232,52 @@ class FSM:
         self.transitions = new_transitions_all
 
     def determinize(self) -> "FSM":
+        '''
+            确定性化 FSM，返回新的确定性 FSM
+        '''
+
+        # 1. 初始化
         new_fsm = FSM()
         if self.start_state is None:
             return new_fsm
         start_set = frozenset([self.start_state])
-        subset_map: Dict[frozenset, int] = {}
-        start_is_end = any(self.states[s].is_end for s in start_set)
+        subset_map: Dict[frozenset, int] = {}       # frozenset(不可变集合)可哈希
+
+        # 2. DFA初始状态
+        start_is_end = any(self.states[s].is_end for s in start_set)    # 只要有一个状态是结束状态，新状态就标记为结束状态
         start_id = new_fsm.new_state(is_start=True, is_end=start_is_end)
-        new_fsm.states[start_id].visit_count = sum(self.states[s].visit_count for s in start_set if s in self.states)
+        # 新状态的访问次数取所有原状态中最大的(避免互斥分支的虚高)
+        new_fsm.states[start_id].visit_count = max(
+            (self.states[s].visit_count for s in start_set if s in self.states),
+            default=0
+        )
         subset_map[start_set] = start_id
-        queue: List[frozenset] = [start_set]
-        while queue:
-            current = queue.pop(0)
+
+        # 3. 构建DFA状态转移
+        queue = deque([start_set])
+        while queue:                    # 使用队列进行 BFS 遍历
+            current = queue.popleft()
             current_id = subset_map[current]
-            sym_targets: Dict[str, set] = {}
-            counts: Dict[str, int] = {}
-            for s in current:
+            sym_targets: Dict[str, set] = {}    # 按符号分组收集状态    
+            counts: Dict[str, int] = {}         # 记录每个符号的最大遍历次数
+            for s in current:                   # 遍历当前状态集中的每个状态
                 state = self.states.get(s)
                 if not state:
                     continue
-                for t in state.transitions:
+                for t in state.transitions:                 # 遍历当前状态的每个转移
                     sym_targets.setdefault(t.symbol, set()).add(t.dst)
-                    counts[t.symbol] = counts.get(t.symbol, 0) + (t.traverse_count or 0)
+                    counts[t.symbol] = max(
+                        counts.get(t.symbol, 0), t.traverse_count or 0
+                    )
             for sym, targets in sym_targets.items():
                 target_set = frozenset(targets)
-                if target_set not in subset_map:
+                if target_set not in subset_map:        # 避免重复状态
                     is_end = any(self.states[x].is_end for x in target_set)
                     new_id = new_fsm.new_state(is_end=is_end)
-                    new_fsm.states[new_id].visit_count = sum(self.states[s].visit_count for s in target_set if s in self.states)
+                    new_fsm.states[new_id].visit_count = max(
+                        (self.states[s].visit_count for s in target_set if s in self.states),
+                        default=0
+                    )
                     subset_map[target_set] = new_id
                     queue.append(target_set)
                 tran = new_fsm.add_transition(current_id, subset_map[target_set], sym)

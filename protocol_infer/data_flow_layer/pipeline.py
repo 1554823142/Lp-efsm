@@ -112,5 +112,6 @@ class DataFlowPipeline:
         for ev in trace.abstract_messages:
             sequences[ev.session_key].append((ev.symbol, ev.vars))
 
-        efsm = self.efsm_inferencer.build_efsm(fsm, sequences)
+        fsm_dfa = fsm.determinize()         # 确定性化 FSM
+        efsm = self.efsm_inferencer.build_efsm(fsm_dfa, sequences)
         return efsm
