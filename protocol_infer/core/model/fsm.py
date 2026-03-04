@@ -210,3 +210,86 @@ class FSM:
                 else:
                     lines.append(f"    --[{tran.symbol}]--> {tran.dst}")
         return "\n".join(lines)
+
+    def enforce_determinism(self) -> None:
+        new_transitions_all: List[Transition] = []
+        for sid, state in self.states.items():
+            by_symbol: Dict[str, List[Transition]] = {}
+            for t in state.transitions:
+                by_symbol.setdefault(t.symbol, []).append(t)
+            kept: List[Transition] = []
+            for sym, lst in by_symbol.items():
+                if len(lst) == 1:
+                    chosen = lst[0]
+                else:
+                    chosen = max(lst, key=lambda x: (x.traverse_count, -x.id))
+                kept.append(chosen)
+                self._by_state_input[(sid, sym)] = [chosen]
+                state.next_states[sym] = chosen.dst
+            state.transitions = kept
+            new_transitions_all.extend(kept)
+        self.transitions = new_transitions_all
+
+    def determinize(self) -> "FSM":
+        new_fsm = FSM()
+        if self.start_state is None:
+            return new_fsm
+        start_set = frozenset([self.start_state])
+        subset_map: Dict[frozenset, int] = {}
+        start_is_end = any(self.states[s].is_end for s in start_set)
+        start_id = new_fsm.new_state(is_start=True, is_end=start_is_end)
+        subset_map[start_set] = start_id
+        queue: List[frozenset] = [start_set]
+        while queue:
+            current = queue.pop(0)
+            current_id = subset_map[current]
+            sym_targets: Dict[str, set] = {}
+            counts: Dict[str, int] = {}
+            for s in current:
+                state = self.states.get(s)
+                if not state:
+                    continue
+                for t in state.transitions:
+                    sym_targets.setdefault(t.symbol, set()).add(t.dst)
+                    counts[t.symbol] = counts.get(t.symbol, 0) + (t.traverse_count or 0)
+            for sym, targets in sym_targets.items():
+                target_set = frozenset(targets)
+                if target_set not in subset_map:
+                    is_end = any(self.states[x].is_end for x in target_set)
+                    new_id = new_fsm.new_state(is_end=is_end)
+                    subset_map[target_set] = new_id
+                    queue.append(target_set)
+                tran = new_fsm.add_transition(current_id, subset_map[target_set], sym)
+                tran.traverse_count = counts.get(sym, 0)
+        return new_fsm
+
+    def remove_duplicate_transitions(self) -> None:
+        '''
+            遍历所有转移，用 (src, dst, symbol) 三元组作为唯一标识
+            清空所有状态的转移列表，重新构建
+        '''
+        seen: set = set()
+        unique: List[Transition] = []           # 仅保留第一次出现的转移
+        # 1. 格式化为三元组 (src, dst, symbol)
+        for tran in self.transitions:
+            key = (tran.src, tran.dst, tran.symbol)     # 三元组
+            if key not in seen:
+                seen.add(key)
+                unique.append(tran)
+
+        # 2. 重新构建转移列表
+        self.transitions = unique
+        self._by_state_input.clear()
+        for sid in self.states:
+            self.states[sid].transitions = []
+            self.states[sid].next_states.clear()
+            self.states[sid].prev_states.clear()
+        
+        # 3. 构建状态转移索引
+        for tran in self.transitions:
+            self._by_state_input.setdefault((tran.src, tran.symbol), []).append(tran)
+            if tran.src in self.states:
+                self.states[tran.src].transitions.append(tran)
+                self.states[tran.src].next_states[tran.symbol] = tran.dst
+            if tran.dst in self.states:
+                self.states[tran.dst].prev_states[tran.symbol] = tran.src

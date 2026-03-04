@@ -31,6 +31,7 @@ class KTailStateMerger(StateMerger):
             if len(group) > 1:
                 self.merge_group(group, fsm)
 
+        fsm.remove_duplicate_transitions()      # 将k-tail合并后的冗余相同转移边去除
         return fsm
 
     def signiture_compute(self, sid: int, k: int, fsm: FSM) ->tuple:
