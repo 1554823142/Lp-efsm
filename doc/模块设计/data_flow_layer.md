@@ -76,3 +76,11 @@ trace.session_contexts = {
     .....
 ```
 
+## efsm推断
+
+**从有限状态机（FSM）+ 会话变量数据，推断出扩展有限状态机（EFSM）**，并为每个转移附加 guard（守卫条件）和 action（动作函数）
+
+### 学习器选择
+
+默认选择区间约束, 即`IntervalDeltaLearner()`
+

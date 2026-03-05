@@ -20,51 +20,30 @@ class EFSMInferencer:
         fsm: FSM,
         sequences: Dict[SessionKey, List[Tuple[str, Dict[str, float]]]]
     ) -> EFSM:
-        """
-        构建 EFSM：
-            - 收集每个转移的变量实例
-            - 学习 guard/action
-            - 返回带 guard/action 的 EFSM
-        """
+
+        '''
+            传入的fsm已经是确定的fsm, 所以不再需要再选用visit最大的转移路径
+        '''
         efsm = EFSM(base_fsm=fsm)
         transition_vars: Dict[tuple, List[Dict[str, float]]] = defaultdict(list)
+        all_vars: set = set()
 
         for session_key, pairs in sequences.items():
             current_state = fsm.start_state
             for symbol, vars_dict in pairs:
+                all_vars.update(vars_dict.keys())
                 candidates = fsm.get_transitions(current_state, symbol)
                 if not candidates:
                     break
-                tran = max(
-                    candidates,
-                    key=lambda t: (
-                        fsm.states.get(t.dst).visit_count
-                        if t.dst in fsm.states
-                        else 0
-                    )
-                )
-                key = (tran.src, tran.symbol)
-                transition_vars[key].append(vars_dict)
+                tran = candidates[0]
+                transition_vars[(tran.src, tran.symbol)].append(vars_dict)
                 current_state = tran.dst
 
         for tran in efsm.transitions:
-            key = (tran.src, tran.symbol)
-            var_instances = transition_vars.get(key, [])
+            var_instances = transition_vars.get((tran.src, tran.symbol), [])
             if var_instances:
                 guard, action = self.learner.learn(var_instances)
                 efsm.register_guard_action(tran, guard, action)
 
-        if sequences:
-            first_seq = next(iter(sequences.values()))
-            if first_seq:
-                efsm.variable_defs = set(first_seq[0][1].keys())
-
+        efsm.variable_defs = all_vars
         return efsm
-
-    def _learn_guard(self, var_instances: List[Dict[str, float]]) -> Optional[Callable]:
-        guard, _ = self.learner.learn(var_instances)
-        return guard
-
-    def _learn_action(self, var_instances: List[Dict[str, float]]) -> Optional[Callable]:
-        _, action = self.learner.learn(var_instances)
-        return action
