@@ -1,9 +1,10 @@
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Optional
 from protocol_infer.pcap_layer.pipeline import PCAPPipeline
 from protocol_infer.control_flow_layer.features.control_feature_extraction import ControlFeatureExtraction
 from protocol_infer.control_flow_layer.abstraction.clustering_abstraction import ClusterMessageAbstractor
 from protocol_infer.algorithm.clustering.kmeans import KMeansClustering
+from protocol_infer.algorithm.clustering.dbscan import DBSCANClustering
 from protocol_infer.control_flow_layer.inference.pta_infer import PTAInfer
 from protocol_infer.core.datamodel.trace import Trace
 from protocol_infer.core.datamodel.session import SessionKey
@@ -11,9 +12,30 @@ from protocol_infer.core.model.fsm import FSM
 from protocol_infer.algorithm.states_merging.K_tails import KTailStateMerger
 
 class ControlFlowPipeline:
-    def __init__(self, n_clusters: int = 8, k: int = 4):
+    def __init__(
+        self,
+        algorithm: str = "kmeans",
+        n_clusters: int = 8,
+        k: int = 4,
+        eps: float = 0.5,
+        min_samples: int = 5,
+        use_apriori: bool = True
+    ):
+        self.use_apriori = use_apriori
+        
+        # 1. 选择聚类算法
+        if algorithm == "kmeans":
+            self.clusterer = KMeansClustering(n_clusters=n_clusters, random_state=42)
+        elif algorithm == "dbscan":
+            self.clusterer = DBSCANClustering(eps=eps, min_samples=min_samples)
+        else:
+            raise ValueError(f"Unsupported algorithm: {algorithm}")
+
+        self.abstractor = ClusterMessageAbstractor(self.clusterer)
+        
+        # 默认特征提取器，若开启 Apriori 会在 run 时被动态替换或增强
         self.featureer = ControlFeatureExtraction()
-        self.abstractor = ClusterMessageAbstractor(KMeansClustering(n_clusters=n_clusters, random_state=42))
+        
         self.inferer = PTAInfer()
         self.merger = KTailStateMerger(k)
         
@@ -27,10 +49,10 @@ class ControlFlowPipeline:
         return self.run(trace)
 
     def run(self, trace: Trace) -> FSM:
-        # group events by session
+        # 1. 按照 session_key 分桶
         sessions = defaultdict(list)
         for ev in trace.events:
-            sessions[ev.session_key].append(ev)     # 将事件按照session_key分桶  session_key -> [事件]
+            sessions[ev.session_key].append(ev)
         
         # 为每个会话排序事件
         for sk, events in sessions.items():
@@ -39,35 +61,39 @@ class ControlFlowPipeline:
         # 缓存sessions供其他层使用
         self._sessions = dict(sessions)
 
-        # sort and extract features per event and collect all features
+        # 2. 如果开启了 Apriori，先进行伪字段发现
+        if self.use_apriori:
+            from protocol_infer.control_flow_layer.features.apriori_feature_extraction import AprioriFeatureExtraction
+            # 使用全量事件发现静态字段组合 (伪字段)
+            self.featureer = AprioriFeatureExtraction.from_events(trace.events)
+
+        # 3. 提取特征
         all_features = []
         sess_features = {}
         for sk, events in sessions.items():
-
-            features = self.featureer.extract(events)       # 提取特征
+            features = self.featureer.extract(events)
             sess_features[sk] = (events, features)
             all_features.extend(features)
 
         # 缓存(sess_features)供数据流层复用
         self._sess_features = sess_features
 
-        # 训练聚类模型
+        # 4. 训练聚类模型 (Message Abstraction)
         if len(all_features) == 0:
             raise RuntimeError("no events found")
         self.abstractor.fit(all_features)
 
-        # build sequences
+        # 5. 生成符号序列
         sequences = {}
         for sk, (events, features) in sess_features.items():
-            symbols = [self.abstractor.abstract(f) for f in features]   # 生成符号序列
+            symbols = [self.abstractor.abstract(f) for f in features]
             sequences[sk] = symbols
 
-        # infer FSM
+        # 6. 推断初始 FSM (PTA)
         fsm = self.inferer.infer(sequences)
 
-        # merge states
+        # 7. 状态合并 (K-tails)
         fsm = self.merger.merge(fsm)
-        # print(fsm)
         
         return fsm
     
