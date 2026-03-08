@@ -1,3 +1,4 @@
+
 from collections import defaultdict
 from typing import Dict, List, Optional
 from protocol_infer.pcap_layer.pipeline import PCAPPipeline
@@ -43,6 +44,8 @@ class ControlFlowPipeline:
         self._sessions: Dict[SessionKey, List] = None
         # 缓存每会话的(events, features)
         self._sess_features: Dict[SessionKey, tuple] = None
+        # 缓存 apriori 发现的位置
+        self._apriori_positions: Optional[List[int]] = None
 
     def run_from_pcap(self, pcap_path: str) -> FSM:
         trace = PCAPPipeline().run(pcap_path)
@@ -66,6 +69,7 @@ class ControlFlowPipeline:
             from protocol_infer.control_flow_layer.features.apriori_feature_extraction import AprioriFeatureExtraction
             # 使用全量事件发现静态字段组合 (伪字段)
             self.featureer = AprioriFeatureExtraction.from_events(trace.events)
+            self._apriori_positions = self.featureer.positions
 
         # 3. 提取特征
         all_features = []
@@ -111,3 +115,9 @@ class ControlFlowPipeline:
         获取每个会话的(events, features)，供其他层复用符号特征
         """
         return self._sess_features
+
+    def get_apriori_positions(self) -> Optional[List[int]]:
+        """
+        获取 Apriori 发现的有效载荷偏移位置，供数据流层复用
+        """
+        return self._apriori_positions

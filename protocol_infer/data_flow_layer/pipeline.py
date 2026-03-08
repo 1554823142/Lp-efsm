@@ -1,3 +1,4 @@
+
 from collections import defaultdict
 from typing import Dict, List, Optional
 
@@ -21,6 +22,7 @@ class DataFlowPipeline:
         self,
         abstractor: Optional[MessageAbstractor] = None,
         symbol_featureer: Optional[FeatureExtractor] = None,
+        feature_processor: Optional[FeatureProcessor] = None,
     ):
         """
         数据流层管道：
@@ -28,7 +30,7 @@ class DataFlowPipeline:
             2) 抽象变量 → 符号，写入 Trace.abstract_messages（AbstractionProcessor）
             3) 基于 FSM + 变量序列 构建 EFSM（EFSMInferencer）
         """
-        self.feature_processor = FeatureProcessor()
+        self.feature_processor = feature_processor or FeatureProcessor()
         self.abstraction_processor = AbstractionProcessor(abstractor)
         self.symbol_featureer = symbol_featureer
         self.efsm_inferencer = EFSMInferencer()
@@ -53,13 +55,20 @@ class DataFlowPipeline:
         fsm: FSM,
         sessions: Optional[Dict[SessionKey, List]] = None,
         precomputed_sess_features: Optional[Dict[SessionKey, tuple]] = None,
+        apriori_positions: Optional[List[int]] = None
     ) -> EFSM:
         """
         从 Trace(增强版) + FSM 构建 EFSM。
         增强版 Trace 包含：
             - abstract_messages：抽象消息序列（由 AbstractionProcessor 写入）
             - session_contexts：会话级上下文（由 FeatureProcessor 写入）
+            
+        apriori_positions: 从控制流层传入的有效载荷偏移位置，如果提供则会更新 feature_processor
         """
+        
+        # 如果提供了新的偏移位置，重新初始化 FeatureProcessor
+        if apriori_positions is not None:
+            self.feature_processor = FeatureProcessor(apriori_positions=apriori_positions)
 
         sessions = self._prepare_sessions(trace, sessions)
 
