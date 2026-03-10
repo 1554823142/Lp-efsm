@@ -52,7 +52,7 @@ class SessionContext:
 
   请求-响应成功配对比例, 如高的则为典型的请求-响应协议, 低则为流式协议
 
-### 构建方法
+#### 构建方法
 
 `self.feature_processor.build_session_contexts(trace, sessions)`
 
@@ -76,7 +76,15 @@ trace.session_contexts = {
     .....
 ```
 
+### 抽象消息
+
+通过复用控制流处理时生成的symbol(或重新计算), 利用控制流之前学习好的abstractor(即聚类模型, 存储了特征向量->symbol)可以保证此时构建的efsm与原先的fsm的symbol保持一致, 构建`AbstractMessage`, 并且在其之中加入变量(`vars`成员), 为后续的guard学习做准备.
+
+这步会在trace中添加`abstract_messages`成员
+
 ## efsm推断
+
+在由fsm构建efsm之前, 需要对fsm进行确定化, 即将NFM转为DFM
 
 **从有限状态机（FSM）+ 会话变量数据，推断出扩展有限状态机（EFSM）**，并为每个转移附加 guard（守卫条件）和 action（动作函数）
 

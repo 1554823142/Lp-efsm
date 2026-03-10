@@ -1,23 +1,27 @@
 from protocol_infer.core.datamodel.context import SessionContext
-from typing import Dict, List
+from typing import Dict, List, Optional
 from protocol_infer.core.datamodel.session import SessionKey
 from protocol_infer.core.datamodel.event import MessageEvent, Direction
 from collections import defaultdict
 import math
 
 class ContextExtractor:
-    """提取单个消息的变量特征"""
-    def extract_vars(self, event: MessageEvent) -> Dict[str, float]:
-        payload = event.payload
+    def __init__(self, byte_positions: Optional[List[int]] = None):
+        self.byte_positions = byte_positions if byte_positions is not None else [0, 1]
 
-        vars = {
+    def extract_vars(self, event: MessageEvent) -> Dict[str, float]:
+        payload = event.payload or b""
+
+        vars_dict: Dict[str, float] = {
             "len": float(len(payload)),
-            "direction": event.direction.to_feature(),
+            "direction": float(event.direction.to_feature()),
             "entropy": self._calculate_entropy(payload),
-            "b0": float(payload[0]) if len(payload) > 0 else -1.0,
-            "b1": float(payload[1]) if len(payload) > 1 else -1.0,
         }
-        return vars
+
+        for pos in self.byte_positions:
+            vars_dict[f"b{pos}"] = float(payload[pos]) if pos < len(payload) else 0.0
+
+        return vars_dict
     
     def _calculate_entropy(self, data: bytes) -> float:
         """计算字节序列的熵"""
@@ -41,7 +45,9 @@ class ContextExtractor:
 
 
 class SessionContextBuilder:
-    """构建会话级上下文信息"""
+
+    def __init__(self, server_ports: Optional[set] = None):
+        self.server_ports = server_ports or {502, 20000, 2404}
     
     def build(self, events: List[MessageEvent]) -> SessionContext:
         """从事件列表构建SessionContext"""
@@ -94,15 +100,27 @@ class SessionContextBuilder:
             suspected_protocol=suspected_protocol
         )
     
-    def _determine_direction(self, session_key: SessionKey, 
-                            c2s_events: List[MessageEvent],
-                            s2c_events: List[MessageEvent]) -> tuple:
-        """判断客户端和服务器端口"""
-        # 简单策略：假设端口号较小的为服务器
-        if session_key.port1 < session_key.port2:
-            return True, session_key.port2  # port1是客户端，port2是服务器
+    def _determine_direction(
+        self,
+        session_key: SessionKey,
+        c2s_events: List[MessageEvent],
+        s2c_events: List[MessageEvent],
+    ) -> tuple:
+        port1 = session_key.port1
+        port2 = session_key.port2
+
+        port1_is_server = port1 in self.server_ports
+        port2_is_server = port2 in self.server_ports
+
+        if port1_is_server and not port2_is_server:
+            server_port = port1
+        elif port2_is_server and not port1_is_server:
+            server_port = port2
         else:
-            return False, session_key.port1  # port2是客户端，port1是服务器
+            server_port = min(port1, port2)
+
+        is_client = server_port != port1
+        return is_client, server_port
     
     def _calculate_pair_ratio(self, events: List[MessageEvent]) -> float:
         """计算请求-响应配对比例"""

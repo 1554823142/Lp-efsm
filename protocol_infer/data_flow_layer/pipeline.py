@@ -30,10 +30,10 @@ class DataFlowPipeline:
             2) 抽象变量 → 符号，写入 Trace.abstract_messages（AbstractionProcessor）
             3) 基于 FSM + 变量序列 构建 EFSM（EFSMInferencer）
         """
-        self.feature_processor = feature_processor or FeatureProcessor()
-        self.abstraction_processor = AbstractionProcessor(abstractor)
-        self.symbol_featureer = symbol_featureer
-        self.efsm_inferencer = EFSMInferencer()
+        self.feature_processor = feature_processor or FeatureProcessor()    # 提取特征, 供EFSM的guard学习
+        self.abstraction_processor = AbstractionProcessor(abstractor)       # 特征向量 -> symbol(保证数据/控制流层一致)
+        self.symbol_featureer = symbol_featureer or FeatureProcessor()      # 复用控制流层的特征提取器以生成symbol
+        self.efsm_inferencer = EFSMInferencer()                             # 在FSM的基础上学习guard和action
 
 
     def _prepare_sessions(
@@ -84,13 +84,13 @@ class DataFlowPipeline:
                 for events, symbol_features in precomputed_sess_features.values():
                     for ev, feat in zip(events, symbol_features):
                         vars_dict = self.feature_processor.extract_vars(ev)
-                        symbol = self.abstraction_processor.abstractor.abstract(feat)
+                        symbol = self.abstraction_processor.abstractor.abstract(feat)   # feature->symbol(string类型), 只abstract, 不fit
                         abstract_msgs.append(
                             AbstractMessage(
                                 session_key=ev.session_key,
                                 timestamp=ev.timestamp,
                                 symbol=symbol,
-                                vars=vars_dict,
+                                vars=vars_dict,             # 单条消息级别的变量,分析哪些变量取值规律可以作为转移的触发条件
                                 direction=ev.direction
                             )
                         )
@@ -110,8 +110,8 @@ class DataFlowPipeline:
                                 direction=ev.direction
                             )
                         )
-            trace.abstract_messages = abstract_msgs
-        else:
+            trace.abstract_messages = abstract_msgs     # 写入trace, 供EFSMInferencer使用
+        else:               # 重新训练abstractor
             trace = self.abstraction_processor.fit_and_abstract(
                 trace, sessions, self.feature_processor
             )
@@ -122,5 +122,5 @@ class DataFlowPipeline:
             sequences[ev.session_key].append((ev.symbol, ev.vars))
 
         fsm_dfa = fsm.determinize()         # 确定性化 FSM
-        efsm = self.efsm_inferencer.build_efsm(fsm_dfa, sequences)
+        efsm = self.efsm_inferencer.build_efsm(fsm_dfa, sequences, variable_names=self.feature_processor.var_names())
         return efsm

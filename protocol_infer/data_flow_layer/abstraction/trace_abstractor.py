@@ -1,49 +1,53 @@
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple, Any
 from protocol_infer.core.datamodel.trace import Trace
 from protocol_infer.core.interface.message_abstraction import MessageAbstractor
 from protocol_infer.core.datamodel.abstract_message import AbstractMessage
 from protocol_infer.data_flow_layer.feature.data_feature_extraction import FeatureProcessor
 
 class AbstractionProcessor:
-    def __init__(self, abstractor: Optional[MessageAbstractor] = None):
+    def __init__(
+        self,
+        abstractor: Optional[MessageAbstractor] = None,
+        default_n_clusters: int = 8,
+    ):
         self.abstractor = abstractor
+        self.default_n_clusters = default_n_clusters
 
     def fit_and_abstract(self, trace: Trace, sessions: Dict, feature_processor: FeatureProcessor):
-        # 默认抽象器
         abstractor = self.abstractor
         if abstractor is None:
             from protocol_infer.control_flow_layer.abstraction.clustering_abstraction import ClusterMessageAbstractor
-            from protocol_infer.algorithm.clustering.kmeans import KMeansClustering
-            abstractor = ClusterMessageAbstractor(KMeansClustering(n_clusters=8))
+            from protocol_infer.algorithm.clustering.dbscan import DBSCANClustering
+            abstractor = ClusterMessageAbstractor(DBSCANClustering())
 
-        all_vars = []
-        cached_vars = {}                # 缓存每个事件的变量
+        all_vars: List[List[float]] = []
+        ev_vars_pairs: List[Tuple[Any, Dict[str, float], List[float]]] = []
 
         for events in sessions.values():
             for ev in events:
                 vars_dict = feature_processor.extract_vars(ev)
-                cached_vars[ev] = vars_dict
-                # 收集所有变量, 用于训练抽象器
-                all_vars.append(feature_processor.var_list(vars_dict))
+                var_list = feature_processor.var_list(vars_dict)
+                all_vars.append(var_list)
+                ev_vars_pairs.append((ev, vars_dict, var_list))
 
-        if all_vars:
-            abstractor.fit(all_vars)       # 训练抽象器
+        if not all_vars:
+            trace.abstract_messages = []
+            return trace
 
-        # 生成抽象消息, 将变量转换为符号
+        abstractor.fit(all_vars)
+
         abstract_msgs: List[AbstractMessage] = []
-        for events in sessions.values():
-            for ev in events:
-                vars_dict = cached_vars[ev]
-                symbol = abstractor.abstract(feature_processor.var_list(vars_dict))
-                abstract_msgs.append(
-                    AbstractMessage(
-                        session_key=ev.session_key,
-                        timestamp=ev.timestamp,
-                        symbol=symbol,
-                        vars=vars_dict,
-                        direction=ev.direction
-                    )
+        for ev, vars_dict, var_list in ev_vars_pairs:
+            symbol = abstractor.abstract(var_list)
+            abstract_msgs.append(
+                AbstractMessage(
+                    session_key=ev.session_key,
+                    timestamp=ev.timestamp,
+                    symbol=symbol,
+                    vars=vars_dict,
+                    direction=ev.direction
                 )
+            )
 
         trace.abstract_messages = abstract_msgs
         return trace
