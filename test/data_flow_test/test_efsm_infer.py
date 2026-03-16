@@ -6,6 +6,7 @@ sys.path.insert(0, str(project_root / "protocol_infer"))
 sys.path.insert(0, str(project_root))
 
 from protocol_infer.core.model.fsm import FSM
+from protocol_infer.core.model.efsm import MemoryContext
 from protocol_infer.core.datamodel.session import SessionKey
 from protocol_infer.data_flow_layer.inference.efsm_infer import EFSMInferencer
 
@@ -34,3 +35,28 @@ def test_efsm_build_and_step():
     dst2, new_vars2 = efsm.step(1, "B", {"len": 22.0})
     assert dst2 == 2
     assert isinstance(new_vars2, dict)
+
+
+def test_efsm_cross_message_memory_identity():
+    fsm = build_simple_fsm()
+    sessions = {}
+    for i in range(4):
+        sk = SessionKey(f"1.1.1.{i+1}", 1000 + i, "2.2.2.2", 2000, "udp")
+        tid = float(10 + i)
+        sessions[sk] = [("A", {"tid": tid}), ("B", {"tid": tid})]
+
+    efsm = EFSMInferencer().build_efsm(fsm, sessions)
+    mem = MemoryContext()
+
+    cur, _ = efsm.step_with_memory(efsm.start_state, "A", {"tid": 10.0}, mem)
+    assert cur == 1
+
+    nxt, _ = efsm.step_with_memory(cur, "B", {"tid": 10.0}, mem)
+    assert nxt == 2
+
+    mem.reset()
+    cur, _ = efsm.step_with_memory(efsm.start_state, "A", {"tid": 10.0}, mem)
+    assert cur == 1
+
+    bad, _ = efsm.step_with_memory(cur, "B", {"tid": 11.0}, mem)
+    assert bad is None

@@ -12,6 +12,17 @@ class EFSMState(FSMState):
         self.variables: Dict[str, Any] = variables if variables is not None else {}
 
 
+class MemoryContext:
+    def __init__(self, initial: Optional[Dict[str, Any]] = None):
+        self.data: Dict[str, Any] = dict(initial or {})
+
+    def reset(self) -> None:
+        self.data.clear()
+
+    def update(self, vars: Dict[str, Any]) -> None:
+        self.data.update(vars)
+
+
 class EFSM(FSM):
     """
     扩展有限状态机。
@@ -134,6 +145,37 @@ class EFSM(FSM):
             if tran.guard is not None and not tran.guard(vars):
                 continue
             new_vars = tran.action(vars.copy()) if tran.action is not None else vars.copy()
+            return tran.dst, new_vars
+
+        return None, None
+
+    def step_with_memory(
+        self,
+        sid: int,
+        symbol: str,
+        vars: Dict[str, Any],
+        memory: Optional[MemoryContext] = None,
+    ) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+        candidates: List[Transition] = self._by_state_input.get((sid, symbol), [])
+        mem = memory.data if memory is not None else None
+
+        for tran in candidates:
+            if tran.guard is not None:
+                try:
+                    ok = tran.guard(vars, mem)
+                except TypeError:
+                    ok = tran.guard(vars)
+                if not ok:
+                    continue
+
+            if tran.action is None:
+                return tran.dst, vars.copy()
+
+            try:
+                new_vars = tran.action(vars.copy(), mem)
+            except TypeError:
+                new_vars = tran.action(vars.copy())
+
             return tran.dst, new_vars
 
         return None, None

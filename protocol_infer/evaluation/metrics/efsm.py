@@ -1,5 +1,5 @@
 from typing import Any, Dict, List, Optional, Set, Tuple
-from protocol_infer.core.model.efsm import EFSM
+from protocol_infer.core.model.efsm import EFSM, MemoryContext
 from protocol_infer.core.datamodel.session import SessionKey
 from protocol_infer.evaluation.base import Metric, Evaluator, _safe_div, _mean
 
@@ -14,24 +14,31 @@ class GuardPRF(Metric):
         tp = fp = fn = 0
         for pairs in sequences.values():
             cur = efsm.start_state
+            mem = MemoryContext()
             for sym, vars_dict in pairs:
                 cands = efsm._by_state_input.get((cur, sym), [])
-                pred_ok = any((t.guard is None or t.guard(vars_dict)) for t in cands)
-                if cands:
-                    if pred_ok:
-                        tp += 1
-                    else:
-                        fn += 1
-                cur = cands[0].dst if cands else cur
+                if not cands:
+                    continue
+                nxt, _ = efsm.step_with_memory(cur, sym, vars_dict, mem)
+                if nxt is None:
+                    fn += 1
+                    break
+                tp += 1
+                cur = nxt
         if negative_sequences:
             for pairs in negative_sequences.values():
                 cur = efsm.start_state
+                mem = MemoryContext()
                 for sym, vars_dict in pairs:
                     cands = efsm._by_state_input.get((cur, sym), [])
-                    pred_ok = any((t.guard is None or t.guard(vars_dict)) for t in cands)
-                    if pred_ok:
+                    if not cands:
+                        continue
+                    nxt, _ = efsm.step_with_memory(cur, sym, vars_dict, mem)
+                    if nxt is not None:
                         fp += 1
-                    cur = cands[0].dst if cands else cur
+                        cur = nxt
+                    else:
+                        break
         p = _safe_div(tp, tp + fp) if tp + fp > 0 else 0.0
         r = _safe_div(tp, tp + fn) if tp + fn > 0 else 0.0
         f1 = _safe_div(2 * p * r, p + r) if p + r > 0 else 0.0
@@ -97,9 +104,10 @@ class TraceReplay(Metric):
         ok = 0
         for pairs in sequences.values():
             cur = efsm.start_state
+            mem = MemoryContext()
             good = True
             for sym, vars_in in pairs:
-                nxt, new_vars = efsm.step(cur, sym, vars_in)
+                nxt, _ = efsm.step_with_memory(cur, sym, vars_in, mem)
                 if nxt is None:
                     good = False
                     break
@@ -119,9 +127,10 @@ class FAR_FRR(Metric):
         fn = 0
         for pairs in positive_sequences.values():
             cur = efsm.start_state
+            mem = MemoryContext()
             good = True
             for sym, vars_in in pairs:
-                nxt, _ = efsm.step(cur, sym, vars_in)
+                nxt, _ = efsm.step_with_memory(cur, sym, vars_in, mem)
                 if nxt is None:
                     good = False
                     break
@@ -131,9 +140,10 @@ class FAR_FRR(Metric):
         fp = 0
         for pairs in negative_sequences.values():
             cur = efsm.start_state
+            mem = MemoryContext()
             accepted = True
             for sym, vars_in in pairs:
-                nxt, _ = efsm.step(cur, sym, vars_in)
+                nxt, _ = efsm.step_with_memory(cur, sym, vars_in, mem)
                 if nxt is None:
                     accepted = False
                     break
@@ -163,4 +173,3 @@ class EFSMevaluator(Evaluator):
         if negative_sequences:
             res.update(FAR_FRR().compute(efsm, sequences, negative_sequences))
         return res
-
