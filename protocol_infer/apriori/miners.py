@@ -114,6 +114,7 @@ class StaticFieldInterpreter(ResultInterpreter[List[FrozenSet]]):
         即去除基本每次都会出现的字段, 对区分消息无作用
         """
         self.global_static_threshold = global_static_threshold
+        self.last_global_static_items: FrozenSet[Any] = frozenset()
 
     def interpret(
         self, frequent_itemsets: List[Tuple[FrozenSet, float]]
@@ -126,6 +127,7 @@ class StaticFieldInterpreter(ResultInterpreter[List[FrozenSet]]):
             for fs, sup in frequent_itemsets
             if len(fs) == 1 and sup >= self.global_static_threshold         # sup : 支持率
         }
+        self.last_global_static_items = frozenset(global_static_items)
 
         # 过滤掉包含全局静态字段的项集
         filtered = [
@@ -159,3 +161,12 @@ class StaticFieldMiner:
         fis = self.core.frequent_itemsets(transactions, self.min_support)  
         # 3. 解释频繁项集, 过滤全局静态字段    
         return self.interpreter.interpret(fis)          
+
+    def get_global_static_items(self) -> FrozenSet[Any]:
+        items = getattr(self.interpreter, "last_global_static_items", frozenset())
+        if isinstance(items, frozenset):
+            return items
+        try:
+            return frozenset(items)
+        except TypeError:
+            return frozenset()

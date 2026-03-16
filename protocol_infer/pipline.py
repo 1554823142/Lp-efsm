@@ -28,7 +28,8 @@ class ProtocolInferPipeline:
             fsm=fsm,
             sessions=self.control_flow_pipeline.get_sessions(),
             precomputed_sess_features=self.control_flow_pipeline.get_sess_features(),
-            apriori_positions=self.control_flow_pipeline.get_apriori_positions()
+            apriori_positions=self.control_flow_pipeline.get_apriori_positions(),
+            apriori_static_items=self.control_flow_pipeline.get_apriori_static_items(),
         )
         
         return efsm

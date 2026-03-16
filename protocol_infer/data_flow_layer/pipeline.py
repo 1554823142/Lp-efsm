@@ -10,6 +10,8 @@ from protocol_infer.core.interface.message_abstraction import MessageAbstractor
 from protocol_infer.core.interface.feature_extractor import FeatureExtractor
 from protocol_infer.core.datamodel.abstract_message import AbstractMessage
 
+from protocol_infer.core.algorithm.guard_action import GuardActionLearner
+from protocol_infer.algorithm.guard_action import AprioriGuardLearner
 from protocol_infer.data_flow_layer.feature.data_feature_extraction import FeatureProcessor
 from protocol_infer.data_flow_layer.abstraction.trace_abstractor import AbstractionProcessor
 from protocol_infer.data_flow_layer.inference.efsm_infer import EFSMInferencer
@@ -23,6 +25,7 @@ class DataFlowPipeline:
         abstractor: Optional[MessageAbstractor] = None,
         symbol_featureer: Optional[FeatureExtractor] = None,
         feature_processor: Optional[FeatureProcessor] = None,
+        guard_action_learner: Optional[GuardActionLearner] = None,
     ):
         """
         数据流层管道：
@@ -33,7 +36,9 @@ class DataFlowPipeline:
         self.feature_processor = feature_processor or FeatureProcessor()    # 提取特征, 供EFSM的guard学习
         self.abstraction_processor = AbstractionProcessor(abstractor)       # 特征向量 -> symbol(保证数据/控制流层一致)
         self.symbol_featureer = symbol_featureer or FeatureProcessor()      # 复用控制流层的特征提取器以生成symbol
-        self.efsm_inferencer = EFSMInferencer()                             # 在FSM的基础上学习guard和action
+        self.efsm_inferencer = EFSMInferencer(
+            learner=guard_action_learner if guard_action_learner is not None else AprioriGuardLearner()
+        )                             # 在FSM的基础上学习guard和action
 
 
     def _prepare_sessions(
@@ -55,7 +60,8 @@ class DataFlowPipeline:
         fsm: FSM,
         sessions: Optional[Dict[SessionKey, List]] = None,
         precomputed_sess_features: Optional[Dict[SessionKey, tuple]] = None,
-        apriori_positions: Optional[List[int]] = None
+        apriori_positions: Optional[List[int]] = None,
+        apriori_static_items: Optional[Dict[int, int]] = None,
     ) -> EFSM:
         """
         从 Trace(增强版) + FSM 构建 EFSM。
@@ -66,9 +72,11 @@ class DataFlowPipeline:
         apriori_positions: 从控制流层传入的有效载荷偏移位置，如果提供则会更新 feature_processor
         """
         
-        # 如果提供了新的偏移位置，重新初始化 FeatureProcessor
-        if apriori_positions is not None:
-            self.feature_processor = FeatureProcessor(apriori_positions=apriori_positions)
+        if apriori_positions is not None or apriori_static_items is not None:
+            self.feature_processor = FeatureProcessor(
+                apriori_positions=apriori_positions,
+                apriori_static_items=apriori_static_items,
+            )
 
         sessions = self._prepare_sessions(trace, sessions)
 

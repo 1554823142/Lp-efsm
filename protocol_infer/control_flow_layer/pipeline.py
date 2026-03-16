@@ -46,6 +46,7 @@ class ControlFlowPipeline:
         self._sess_features: Dict[SessionKey, tuple] = None
         # 缓存 apriori 发现的位置
         self._apriori_positions: Optional[List[int]] = None
+        self._apriori_static_items: Optional[Dict[int, int]] = None
 
     def run_from_pcap(self, pcap_path: str) -> FSM:
         trace = PCAPPipeline().run(pcap_path)
@@ -70,6 +71,7 @@ class ControlFlowPipeline:
             # 使用全量事件发现静态字段组合 (伪字段)
             self.featureer = AprioriFeatureExtraction.from_events(trace.events)
             self._apriori_positions = self.featureer.positions
+            self._apriori_static_items = getattr(self.featureer, "static_items", None)
 
         # 3. 提取特征
         all_features = []
@@ -121,3 +123,6 @@ class ControlFlowPipeline:
         获取 Apriori 发现的有效载荷偏移位置，供数据流层复用
         """
         return self._apriori_positions
+
+    def get_apriori_static_items(self) -> Optional[Dict[int, int]]:
+        return self._apriori_static_items

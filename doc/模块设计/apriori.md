@@ -81,3 +81,72 @@ Apriori 核心层只认识 `FrozenSet`，不认识 `MessageEvent`，这个模块
 输入：List[MessageEvent]
 输出：List[List[float]]（每条消息对应一个特征向量）
 ```
+
+### 关于全局静态字段的处理
+
+对于fsm阶段的聚类特征向量, 考虑全局静态字段(表现为常数)就不合理, 因为它没有任何的区分性, 加入它会引入噪声, 降低聚类的效果, 所以需要对其进行过滤.
+
+对于EFSM 的guard学习就很重要, 因为它可以作为constant类型变量的来源. 可以在fsm阶段的Apriori算法中虽然过滤其作为特征向量, 但是可以保留此内容作为后续步骤的信息.
+
+## [guard学习器](..\..\protocol_infer\algorithm\guard_action\apriori_guard.py)
+
+#### 流程
+
+#### 变量类型推断
+
+```txt
+唯一值 = 1                → constant    e.g. [3,3,3,3]
+唯一值 ≤ discrete_threshold → discrete  e.g. [3,16,3,16]
+等步长序列                 → sequential  e.g. [1,2,3,4]
+其他                      → continuous  e.g. [1.2,3.7,8.9]
+```
+
+#### Guard学习
+
+- 单变量约束
+
+  每种类型生成对应的约束形式
+
+- Apriori 联合规则
+
+  单变量约束只能孤立检查每个字段，无法发现字段间的条件依赖
+
+  continuous类型变量需要**均值二值化**: 即高于均值的值设为1, 否则设置为0, 这样减少值域数量, 便于挖掘规则
+
+  最终得到A--conf-->B的结果
+
+- 连续变量线性关系
+
+  对 `continuous` 类型的变量对，补充检测线性不变量, 这里借用了Daikon的函数拟合思想
+
+  Daikon算法是**动态不变量检测器**, 观察程序执行过程中变量的值, 记录每次执行时变量的具体取值, 然后归纳不变量(即在所有执行中都成立的属性, 如常量关系, 线性关系, 范围关系, 排序关系)
+
+  - `detect_pairwise`  检测a = k*b + c, 最小二乘法
+
+  - `detect_triplet_sum`: 检测a+b = c
+
+    适配工业协议中常见的字段拆分场景，例如 `high_byte + low_byte ≈ total`
+
+#### Action学习
+
+按**变量类型**决定更新策略
+
+- constant   → keep       
+
+  不更新，值恒定(keep)
+
+- sequential → delta +1   
+
+  固定步长递增
+
+- discrete   → keep       
+
+  离散跳变无法预测，**不更新**(keep)
+
+- continuous → delta 或 keep
+
+  -  |avg_delta| < delta_tolerance → keep
+  -  |avg_delta| < delta_tolerance → delta avg_delta
+
+
+

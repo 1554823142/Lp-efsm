@@ -6,8 +6,13 @@ from collections import defaultdict
 import math
 
 class ContextExtractor:
-    def __init__(self, byte_positions: Optional[List[int]] = None):
+    def __init__(
+        self,
+        byte_positions: Optional[List[int]] = None,
+        static_items: Optional[Dict[int, int]] = None,
+    ):
         self.byte_positions = byte_positions if byte_positions is not None else [0, 1]
+        self.static_items = static_items or {}
 
     def extract_vars(self, event: MessageEvent) -> Dict[str, float]:
         payload = event.payload or b""
@@ -20,6 +25,8 @@ class ContextExtractor:
 
         for pos in self.byte_positions:
             vars_dict[f"b{pos}"] = float(payload[pos]) if pos < len(payload) else 0.0
+        for pos in sorted(self.static_items.keys()):        # 静态偏移pos, 生成变量名s{pos}
+            vars_dict[f"s{pos}"] = float(payload[pos]) if pos < len(payload) else 0.0
 
         return vars_dict
     
