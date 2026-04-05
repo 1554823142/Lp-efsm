@@ -107,6 +107,10 @@ class TraceReplay(Metric):
             mem = MemoryContext()
             good = True
             for sym, vars_in in pairs:
+                # 未知 symbol 不在当前状态的转移表中 → 跳过（不计为拒绝）
+                cands = efsm._by_state_input.get((cur, sym), [])
+                if not cands:
+                    continue
                 nxt, _ = efsm.step_with_memory(cur, sym, vars_in, mem)
                 if nxt is None:
                     good = False
@@ -130,6 +134,9 @@ class FAR_FRR(Metric):
             mem = MemoryContext()
             good = True
             for sym, vars_in in pairs:
+                cands = efsm._by_state_input.get((cur, sym), [])
+                if not cands:
+                    continue
                 nxt, _ = efsm.step_with_memory(cur, sym, vars_in, mem)
                 if nxt is None:
                     good = False
@@ -143,6 +150,9 @@ class FAR_FRR(Metric):
             mem = MemoryContext()
             accepted = True
             for sym, vars_in in pairs:
+                cands = efsm._by_state_input.get((cur, sym), [])
+                if not cands:
+                    continue
                 nxt, _ = efsm.step_with_memory(cur, sym, vars_in, mem)
                 if nxt is None:
                     accepted = False

@@ -1,0 +1,387 @@
+======================================================================
+  EFSM 检视报告 — 协议: MODBUS
+======================================================================
+  训练会话: 5  | PCAP 文件: 6  | FSM 状态数: 22  | 转移数: 25
+  学习到的变量: ['b10', 'b11', 'b5', 'b7', 'b8', 'b9', 'direction', 'dyn_1', 'entropy', 'len', 's0', 's2', 's3', 's4', 's6']
+
+======================================================================
+  协议真值规范（GT）总览
+======================================================================
+  协议: MODBUS
+  转移规则数: 7
+  Guard 字段集合: ['fc', 'proto_id', 'quantity']
+  Action 变量集合: ['byte_count', 'exception_code', 'is_exception']
+
+  转移规则列表:
+  [ 1] read_coils_fc01
+       src_types: {fc_01_c2s}
+       dst_types: {fc_01_s2c}
+       guard: fc=01, proto_id=0, 1<=quantity<=2000
+       action: byte_count = ceil(quantity/8)
+  [ 2] read_coils_fc02
+       src_types: {fc_02_c2s}
+       dst_types: {fc_02_s2c}
+       guard: fc=02, proto_id=0, 1<=quantity<=2000
+       action: byte_count = ceil(quantity/8)
+  [ 3] read_registers_fc03
+       src_types: {fc_03_c2s}
+       dst_types: {fc_03_s2c}
+       guard: fc=03, proto_id=0, 1<=quantity<=125
+       action: byte_count = quantity * 2
+  [ 4] read_registers_fc04
+       src_types: {fc_04_c2s}
+       dst_types: {fc_04_s2c}
+       guard: fc=04, proto_id=0, 1<=quantity<=125
+       action: byte_count = quantity * 2
+  [ 5] write_single_register
+       src_types: {fc_06_c2s}
+       dst_types: {fc_06_s2c}
+       guard: fc=06, proto_id=0
+       action: echo request (start_addr/value mirrored)
+  [ 6] write_multiple_registers
+       src_types: {fc_10_c2s}
+       dst_types: {fc_10_s2c}
+       guard: fc=0x10, proto_id=0, 1<=quantity<=123
+       action: response echoes start_addr and quantity
+  [ 7] exception_response
+       src_types: {fc_01_c2s, fc_02_c2s, fc_03_c2s...}
+       dst_types: {fc_81_s2c, fc_82_s2c, fc_83_s2c...}
+       guard: fc & 0x80 != 0 (exception response)
+       action: exception_code set, is_exception=1
+
+======================================================================
+  字段划分对比
+======================================================================
+
+【协议真值字段布局】
+  txn_id           [b0, b1]  Transaction ID（每请求递增）
+  proto_id         [b2, b3]  Protocol ID（Modbus=0x0000，常量）
+  length           [b4, b5]  Remaining Bytes Count
+  unit_id          [b6]  Unit/Slave ID
+  fc               [b7]  Function Code（关键 guard 字段）
+  start_addr       [b8, b9]  Starting Address（请求）
+  byte_count       [b8]  Byte Count（响应）
+  quantity         [b10, b11]  Quantity（请求）
+
+【Apriori 检测 — 静态字段（常量字节位置）】
+  字节 b 0: 常量值 0x00 (0)  [s0 -> txn_id]
+  字节 b 2: 常量值 0x00 (0)  [s2 -> proto_id]
+  字节 b 3: 常量值 0x00 (0)  [s3 -> proto_id]
+  字节 b 4: 常量值 0x00 (0)  [s4 -> length]
+  字节 b 6: 常量值 0x01 (1)  [s6 -> unit_id]
+
+【Apriori 检测 — 动态字段（变量字节位置）】
+  字节 b 5: 动态变量  [b5 -> length]
+  字节 b 7: 动态变量  [b7 -> fc]
+  字节 b 8: 动态变量  [b8 -> start_addr/byte_count]
+  字节 b 9: 动态变量  [b9 -> start_addr]
+  字节 b10: 动态变量  [b10 -> quantity]
+  字节 b11: 动态变量  [b11 -> quantity]
+
+【DynamicFieldDetector 检测 — 多字节结构化字段】
+  dyn_1             : 1字节 big-endian  [b1]  → txn_id
+
+【字段覆盖率分析】
+  已知协议字节位置 (GT):  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+  学习到的字节位置:        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+  TP (正确识别): [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]  FP (误识别): []  FN (漏检): []
+  Precision=1.000  Recall=1.000  F1=1.000
+
+======================================================================
+  Guard / Action 条件对比（逐转移）
+======================================================================
+
+────────────────────────────────────────────────────────────
+  转移: s0 ──[C1]──> s3   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    (样本不足 — 所有变量保持不变)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s0 ──[C4]──> s2   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    (样本不足 — 所有变量保持不变)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s0 ──[C6]──> s1   (触发次数=2)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    [不变字段] b10(quantity), b11(quantity), b5(length), b7(fc), b8(start_addr/byte_count), b9(start_addr), direction, dyn_1, entropy, len, s0(txn_id), s2(proto_id), s3(proto_id), s4(length), s6(unit_id)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s0 ──[C7]──> s4   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    (样本不足 — 所有变量保持不变)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s1 ──[C6]──> s5   (触发次数=2)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    [不变字段] b10(quantity), b11(quantity), b5(length), b7(fc), b8(start_addr/byte_count), b9(start_addr), direction, dyn_1, entropy, len, s0(txn_id), s2(proto_id), s3(proto_id), s4(length), s6(unit_id)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s2 ──[C5]──> s6   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    (样本不足 — 所有变量保持不变)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s3 ──[C0]──> s7   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    (样本不足 — 所有变量保持不变)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s4 ──[C8]──> s5   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    (样本不足 — 所有变量保持不变)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s6 ──[C4]──> s8   (触发次数=11)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    (样本不足 — 所有变量保持不变)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s7 ──[C3]──> s9   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    (样本不足 — 所有变量保持不变)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s8 ──[C5]──> s10   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    (样本不足 — 所有变量保持不变)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s9 ──[C2]──> s11   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    (样本不足 — 所有变量保持不变)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s10 ──[C4]──> s12   (触发次数=11)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    (样本不足 — 所有变量保持不变)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s11 ──[C1]──> s13   (触发次数=43)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    (样本不足 — 所有变量保持不变)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s12 ──[C5]──> s14   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束]
+      b5(length) == 16.0
+      b7(fc) == 1.0
+      b8(start_addr/byte_count) == 13.0
+  [学习 Guard - 跨消息]
+    [恒等关系] curr.x == prev.y
+      curr.dyn_1 == prev.dyn_1
+  [学习 Action]
+    [不变字段] b10(quantity), b11(quantity), b5(length), b7(fc), b8(start_addr/byte_count), b9(start_addr), direction, dyn_1, entropy, len, s0(txn_id), s2(proto_id), s3(proto_id), s4(length), s6(unit_id)
+  [GT 参考]
+    规则 [read_coils_fc01]: fc=01, proto_id=0, 1<=quantity<=2000
+    Action: byte_count = ceil(quantity/8)
+  [Guard 字段对比]
+    GT guard 字段: {fc, proto_id, quantity}
+    学习字段:      {byte_count, fc, length, start_addr}
+    TP={fc}  FP={byte_count, length, start_addr}  FN={proto_id, quantity}
+    Precision=0.250  Recall=0.333  F1=0.286
+
+────────────────────────────────────────────────────────────
+  转移: s13 ──[C0]──> s15   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束]
+      b5(length) == 5.0
+      b7(fc) == 3.0
+      b8(start_addr/byte_count) == 2.0
+  [学习 Guard - 跨消息]
+    [恒等关系] curr.x == prev.y
+      curr.dyn_1 == prev.dyn_1
+  [学习 Action]
+    [变化字段]
+      dyn_1 += 2.0
+    [不变字段] b10(quantity), b11(quantity), b5(length), b7(fc), b8(start_addr/byte_count), b9(start_addr), direction, entropy, len, s0(txn_id), s2(proto_id), s3(proto_id), s4(length), s6(unit_id)
+  [GT 参考]
+    规则 [read_registers_fc03]: fc=03, proto_id=0, 1<=quantity<=125
+    Action: byte_count = quantity * 2
+  [Guard 字段对比]
+    GT guard 字段: {fc, proto_id, quantity}
+    学习字段:      {byte_count, fc, length, start_addr}
+    TP={fc}  FP={byte_count, length, start_addr}  FN={proto_id, quantity}
+    Precision=0.250  Recall=0.333  F1=0.286
+
+────────────────────────────────────────────────────────────
+  转移: s14 ──[C4]──> s12   (触发次数=11)
+  [学习 Guard - 单消息]
+    [单变量约束]
+      b11(quantity) == 100.0
+      b5(length) == 6.0
+      b7(fc) == 1.0
+      b9(start_addr) == 10.0
+  [学习 Guard - 跨消息]
+    [序列递增]
+      dyn_1 += 1.0  (逐消息递增)
+  [学习 Action]
+    [不变字段] b10(quantity), b11(quantity), b5(length), b7(fc), b8(start_addr/byte_count), b9(start_addr), direction, dyn_1, entropy, len, s0(txn_id), s2(proto_id), s3(proto_id), s4(length), s6(unit_id)
+  [GT 参考]
+    规则 [read_coils_fc01]: fc=01, proto_id=0, 1<=quantity<=2000
+    Action: byte_count = ceil(quantity/8)
+    规则 [read_coils_fc02]: fc=02, proto_id=0, 1<=quantity<=2000
+    Action: byte_count = ceil(quantity/8)
+  [Guard 字段对比]
+    GT guard 字段: {fc, proto_id, quantity}
+    学习字段:      {fc, length, quantity, start_addr}
+    TP={fc, quantity}  FP={length, start_addr}  FN={proto_id}
+    Precision=0.500  Recall=0.667  F1=0.571
+
+────────────────────────────────────────────────────────────
+  转移: s15 ──[C3]──> s16   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束]
+      b11(quantity) == 1.0
+      b5(length) == 6.0
+      b7(fc) == 3.0
+  [学习 Action]
+    [变化字段]
+      dyn_1 += -9.636363636363637
+    [不变字段] b10(quantity), b11(quantity), b5(length), b7(fc), b8(start_addr/byte_count), b9(start_addr), direction, entropy, len, s0(txn_id), s2(proto_id), s3(proto_id), s4(length), s6(unit_id)
+  [GT 参考]
+    规则 [read_registers_fc03]: fc=03, proto_id=0, 1<=quantity<=125
+    Action: byte_count = quantity * 2
+    规则 [read_coils_fc01]: fc=01, proto_id=0, 1<=quantity<=2000
+    Action: byte_count = ceil(quantity/8)
+  [Guard 字段对比]
+    GT guard 字段: {fc, proto_id, quantity}
+    学习字段:      {fc, length, quantity}
+    TP={fc, quantity}  FP={length}  FN={proto_id}
+    Precision=0.667  Recall=0.667  F1=0.667
+
+────────────────────────────────────────────────────────────
+  转移: s16 ──[C2]──> s17   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束]
+      b10(quantity) == 200.0
+      b5(length) == 5.0
+      b7(fc) == 3.0
+      b8(start_addr/byte_count) == 2.0
+      b9(start_addr) == 65.0
+  [学习 Guard - 跨消息]
+    [线性关系] curr.dst = k * prev.src + c
+      curr.dyn_1 = 0.996 * prev.dyn_1 + 0.9389  (R²=1.0000)
+  [学习 Action]
+    [变化字段]
+      dyn_1 += -9.590909090909092
+    [不变字段] b10(quantity), b11(quantity), b5(length), b7(fc), b8(start_addr/byte_count), b9(start_addr), direction, entropy, len, s0(txn_id), s2(proto_id), s3(proto_id), s4(length), s6(unit_id)
+  [GT 参考]
+    规则 [read_registers_fc03]: fc=03, proto_id=0, 1<=quantity<=125
+    Action: byte_count = quantity * 2
+    规则 [read_coils_fc01]: fc=01, proto_id=0, 1<=quantity<=2000
+    Action: byte_count = ceil(quantity/8)
+  [Guard 字段对比]
+    GT guard 字段: {fc, proto_id, quantity}
+    学习字段:      {byte_count, fc, length, quantity, start_addr}
+    TP={fc, quantity}  FP={byte_count, length, start_addr}  FN={proto_id}
+    Precision=0.400  Recall=0.667  F1=0.500
+
+────────────────────────────────────────────────────────────
+  转移: s17 ──[C1]──> s13   (触发次数=43)
+  [学习 Guard - 单消息]
+    [单变量约束]
+      b11(quantity) == 1.0
+      b5(length) == 6.0
+      b7(fc) == 3.0
+      b9(start_addr) == 1.0
+  [学习 Guard - 跨消息]
+    [序列递增]
+      dyn_1 += 1.0  (逐消息递增)
+  [学习 Action]
+    [变化字段]
+      dyn_1 += 2.0
+    [不变字段] b10(quantity), b11(quantity), b5(length), b7(fc), b8(start_addr/byte_count), b9(start_addr), direction, entropy, len, s0(txn_id), s2(proto_id), s3(proto_id), s4(length), s6(unit_id)
+  [GT 参考]
+    规则 [read_registers_fc03]: fc=03, proto_id=0, 1<=quantity<=125
+    Action: byte_count = quantity * 2
+    规则 [read_coils_fc01]: fc=01, proto_id=0, 1<=quantity<=2000
+    Action: byte_count = ceil(quantity/8)
+  [Guard 字段对比]
+    GT guard 字段: {fc, proto_id, quantity}
+    学习字段:      {fc, length, quantity, start_addr}
+    TP={fc, quantity}  FP={length, start_addr}  FN={proto_id}
+    Precision=0.500  Recall=0.667  F1=0.571
+
+────────────────────────────────────────────────────────────
+  转移: s17 ──[C3]──> s18   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    (样本不足 — 所有变量保持不变)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s18 ──[C2]──> s19   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    (样本不足 — 所有变量保持不变)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s19 ──[C3]──> s20   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    (样本不足 — 所有变量保持不变)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s20 ──[C2]──> s21   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    [不变字段] b10(quantity), b11(quantity), b5(length), b7(fc), b8(start_addr/byte_count), b9(start_addr), direction, dyn_1, entropy, len, s0(txn_id), s2(proto_id), s3(proto_id), s4(length), s6(unit_id)
+  [GT 参考] (未找到匹配的 GT 转移规范)
+
+────────────────────────────────────────────────────────────
+  转移: s21 ──[C3]──> s20   (触发次数=1)
+  [学习 Guard - 单消息]
+    [单变量约束] (无)
+  [学习 Action]
+    (样本不足 — 所有变量保持不变)
+  [GT 参考] (未找到匹配的 GT 转移规范)

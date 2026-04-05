@@ -99,6 +99,30 @@ class FSM:
         if tran.dst in self.states:
             self.states[tran.dst].prev_states[tran.symbol] = tran.src
 
+    def accepts(self, sequence: List[str]) -> bool:
+        """
+        Check if the FSM accepts the given sequence of symbols.
+        Assumes deterministic transitions for simplicity, or takes the first matching transition.
+        """
+        if self.start_state is None:
+            return False
+            
+        current_state = self.start_state
+        for symbol in sequence:
+            # Check transitions from current state with this symbol
+            transitions = self._by_state_input.get((current_state, symbol))
+            if not transitions:
+                return False
+            
+            # For now, just take the first transition (greedy/deterministic assumption)
+            # In a non-deterministic FSM, we might need BFS/DFS to find *any* valid path
+            current_state = transitions[0].dst
+            
+        # Check if we ended in a valid state (usually any state is valid for protocol traces unless we have explicit end states)
+        # If we successfully traversed the whole sequence, we consider it "accepted" in terms of coverage
+        return True
+
+
     # ------------------------------------------------------------------ #
     # 状态合并                                                              #
     # ------------------------------------------------------------------ #

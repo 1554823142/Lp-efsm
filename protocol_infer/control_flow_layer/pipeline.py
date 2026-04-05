@@ -1,6 +1,6 @@
 
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from protocol_infer.pcap_layer.pipeline import PCAPPipeline
 from protocol_infer.control_flow_layer.features.control_feature_extraction import ControlFeatureExtraction
 from protocol_infer.control_flow_layer.abstraction.clustering_abstraction import ClusterMessageAbstractor
@@ -16,14 +16,14 @@ class ControlFlowPipeline:
     def __init__(
         self,
         algorithm: str = "kmeans",
-        n_clusters: int = 8,
+        n_clusters: Union[int, str] = "auto",
         k: int = 4,
         eps: float = 0.5,
         min_samples: int = 5,
         use_apriori: bool = True
     ):
         self.use_apriori = use_apriori
-        
+
         # 1. 选择聚类算法
         if algorithm == "kmeans":
             self.clusterer = KMeansClustering(n_clusters=n_clusters, random_state=42)
@@ -88,6 +88,10 @@ class ControlFlowPipeline:
         if len(all_features) == 0:
             raise RuntimeError("no events found")
         self.abstractor.fit(all_features)
+        if isinstance(self.clusterer, KMeansClustering) and self.clusterer.best_k_ is not None:
+            mode = "auto" if self.clusterer.n_clusters == "auto" else "fixed"
+            print(f"[ControlFlow] KMeans K={self.clusterer.best_k_} "
+                  f"(mode={mode}, samples={len(all_features)})")
 
         # 5. 生成符号序列
         sequences = {}

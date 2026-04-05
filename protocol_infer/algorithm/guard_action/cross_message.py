@@ -20,15 +20,33 @@ class CrossMessageLearner:
     def learn(
         self,
         pair_instances: List[Tuple[Dict[str, float], Dict[str, float]]],        # (src, dst)相邻两条消息的配对数据
-    ) -> Optional[Callable[[Dict[str, Any], Optional[Dict[str, Any]]], bool]]:
+    ) -> Tuple[
+        Optional[Callable[[Dict[str, Any], Optional[Dict[str, Any]]], bool]],
+        Optional[Callable[[Dict[str, Any], Optional[Dict[str, Any]]], Dict[str, Any]]],
+    ]:
         if not pair_instances:
-            return None
+            return None, None
 
         src_names = set()
         dst_names = set()
         for src, dst in pair_instances:
             src_names.update(src.keys())
             dst_names.update(dst.keys())
+
+        # 过滤无判别力的变量：
+        # s-前缀（如 s0, s2）是全局静态常量（值恒为某固定值，如 0），
+        # 作为 src 变量时会与任何恰好值也为 0 的 dst 变量产生假恒等规则。
+        # direction/entropy/len 是协议无关的衍生特征，不应参与跨消息规则学习。
+        _SKIP_PREFIX = ("s",)
+        _SKIP_VARS = {"direction", "entropy", "len"}
+        src_names = {
+            n for n in src_names
+            if n not in _SKIP_VARS and not any(n.startswith(p) for p in _SKIP_PREFIX)
+        }
+        dst_names = {
+            n for n in dst_names
+            if n not in _SKIP_VARS and not any(n.startswith(p) for p in _SKIP_PREFIX)
+        }
 
         # 三类规则学习
         identity_rules: List[Tuple[str, str]] = []          # 恒等关系(如dst.x == src.y)
@@ -46,21 +64,36 @@ class CrossMessageLearner:
                 ]
                 if len(samples) < self.min_samples:
                     continue
-                if all(abs(y - x) <= self.residual_tol for x, y in samples):
-                    identity_rules.append((dst_var, src_var))
-        
+                if not all(abs(y - x) <= self.residual_tol for x, y in samples):
+                    continue
+                # 要求值多样性：若所有样本中 src_var 只有唯一一个值（如恒为 0.0 或 3.0），
+                # 则等式是常量平凡等式而非真实的跨消息依赖，跳过。
+                # 对同名变量（curr.X == prev.X）：常量字段的恒等规则无判别力，
+                #   真正有意义的是"会变化但每次都保持与上条相同"的字段（如 fc 在同一会话内固定）。
+                # 对异名变量（curr.X == prev.Y）：防止巧合零值等。
+                distinct_src_vals = {x for x, _y in samples}
+                if len(distinct_src_vals) < 2:
+                    continue
+                identity_rules.append((dst_var, src_var))
+
         # 2. 序列递增关系
         for var in sorted(src_names.intersection(dst_names)):
-            deltas = [
-                dst[var] - src[var]
-                for src, dst in pair_instances
-                if var in src and var in dst
-            ]
-            if len(deltas) < self.min_samples:
+            src_vals = [src[var] for src, dst in pair_instances if var in src and var in dst]
+            dst_vals = [dst[var] for src, dst in pair_instances if var in src and var in dst]
+            if len(src_vals) < self.min_samples:
                 continue
+            deltas = [d - s for s, d in zip(src_vals, dst_vals)]
             d0 = deltas[0]
-            if max(abs(d - d0) for d in deltas) < self.delta_tolerance:
-                seq_rules.append((var, d0))
+            if max(abs(d - d0) for d in deltas) >= self.delta_tolerance:
+                continue
+            # delta=0 意味着变量不变，与恒等规则 curr.x==prev.x 重复，跳过
+            if abs(d0) < self.delta_tolerance:
+                continue
+            # 要求 src 值有多样性：若 src 的值只有一个（如每次 request.b11 都是 100），
+            # delta 的一致性可能只是巧合（不同消息类型的字节布局重合）而非真实依赖。
+            if len(set(src_vals)) < 2:
+                continue
+            seq_rules.append((var, d0))
 
         identity_set = set(identity_rules)
         seq_set = {v for v, _d in seq_rules}
@@ -122,9 +155,24 @@ class CrossMessageLearner:
 
         # 都不满足则说明无可学习的跨消息依赖
         if not identity_rules and not seq_rules and not linear_rules:
-            return None
+            return None, None
 
-        return guard
+        # cross_action：把当前消息变量写入 memory，供下一条消息的 memory_guard 使用。
+        # 同时携带学到的跨消息规则描述（identity/seq/linear），便于检视工具提取。
+        def cross_action(
+            vars: Dict[str, Any],
+            memory: Optional[Dict[str, Any]] = None,
+            _identity_rules=identity_rules,
+            _seq_rules=seq_rules,
+            _linear_rules=linear_rules,
+        ) -> Dict[str, Any]:
+            if memory is not None:
+                mem = memory.data if hasattr(memory, "data") else memory
+                if isinstance(mem, dict):
+                    mem.update(vars)
+            return vars.copy()
+
+        return guard, cross_action
 
     def _fit_linear(
         self,

@@ -1,18 +1,24 @@
 from protocol_infer.core.datamodel.context import SessionContext
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 from protocol_infer.core.datamodel.session import SessionKey
 from protocol_infer.core.datamodel.event import MessageEvent, Direction
 from collections import defaultdict
 import math
+
+if TYPE_CHECKING:
+    from protocol_infer.algorithm.field_detection.dynamic_field_detector import DynamicField
+
 
 class ContextExtractor:
     def __init__(
         self,
         byte_positions: Optional[List[int]] = None,
         static_items: Optional[Dict[int, int]] = None,
+        dynamic_fields: Optional[List["DynamicField"]] = None,
     ):
         self.byte_positions = byte_positions if byte_positions is not None else [0, 1]
         self.static_items = static_items or {}
+        self.dynamic_fields: List["DynamicField"] = dynamic_fields or []
 
     def extract_vars(self, event: MessageEvent) -> Dict[str, float]:
         payload = event.payload or b""
@@ -27,6 +33,11 @@ class ContextExtractor:
             vars_dict[f"b{pos}"] = float(payload[pos]) if pos < len(payload) else 0.0
         for pos in sorted(self.static_items.keys()):        # 静态偏移pos, 生成变量名s{pos}
             vars_dict[f"s{pos}"] = float(payload[pos]) if pos < len(payload) else 0.0
+
+        # 动态字段（单字节/多字节），变量名格式：dyn_{pos} 或 dyn_{pos}_{width}{b/l}
+        for field in self.dynamic_fields:
+            val = field.extract_value(payload)
+            vars_dict[field.var_name] = val if val is not None else 0.0
 
         return vars_dict
     

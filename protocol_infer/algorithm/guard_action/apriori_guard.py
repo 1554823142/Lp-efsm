@@ -198,6 +198,20 @@ class AprioriGuardLearner(GuardActionLearner):
                 return "sequential"
         return "continuous"
 
+    # 不加入 guard 约束的衍生特征（非协议语义字段）
+    # direction: 对给定转移始终恒定（C2S 或 S2C），约束无意义
+    # entropy:   反映 payload 字节多样性，非协议规范字段，学习后导致过拟合
+    # len:       包总字节数，是 payload 的衍生属性，由 FC 类型决定，非 guard 语义字段
+    _GUARD_SKIP_VARS: frozenset = frozenset({"direction", "entropy", "len"})
+
+    # 不加入 guard 约束的变量名前缀
+    # s-前缀（如 s0, s2, s6）：Apriori 静态项，对所有消息均为同一常量值，
+    #   无转移判别力（不能区分本转移与其他转移），加入 guard 只增加误判风险。
+    # dyn_前缀（如 dyn_1, dyn_0_2b）：DynamicFieldDetector 检测的结构化字段，
+    #   多为计数器/序列号（txn_id 等），其值在训练数据中的取值范围不代表协议约束，
+    #   不应作为 guard 条件（否则新会话的 txn_id 值域不同会导致误拒）。
+    _GUARD_SKIP_PREFIX: tuple = ("s", "dyn_")
+
     def _learn_guard(
         self,
         var_instances: List[Dict[str, float]],
@@ -207,16 +221,34 @@ class AprioriGuardLearner(GuardActionLearner):
 
         # 1. 单变量约束(为每种类型生成对应的约束形式)
         # eg: constant -> ("eq",    3.0)    ==>   fc == 3
+        # 当样本数不足 MIN_CONFIDENCE 时，不生成严格约束，
+        # 避免在小样本下过拟合（如 fc=0x2b 的 Object ID 字节、小会话的 FC 值等）。
+        # discrete 类型：少量训练样本（如 C6 仅有 FC=0x16/0x17 各 1 次 = 4 包）
+        # 容易被不同 FC 聚类到同一 cluster 后违反，需同等置信度保护。
+        MIN_CONFIDENCE = 6
         single_constraints: Dict[str, tuple] = {}
         for name in var_names:
+            if name in self._GUARD_SKIP_VARS:
+                continue    # 跳过非协议语义的衍生特征
+            if any(name.startswith(pfx) for pfx in self._GUARD_SKIP_PREFIX):
+                continue    # 跳过静态全局常量字节（s-前缀），无转移判别力
             values = [v[name] for v in var_instances if name in v]
             if not values:
                 continue
             vtype = var_types[name]
             if vtype == "constant":
-                single_constraints[name] = ("eq", values[0])
+                if len(values) >= MIN_CONFIDENCE:
+                    # b-前缀动态字段若唯一值为 0.0，大概率是多字节字段高字节（采样局限）
+                    # 跳过：避免对"quantity高字节=0"此类低信息量字段产生过约束
+                    if name.startswith("b") and values[0] == 0.0:
+                        pass
+                    else:
+                        single_constraints[name] = ("eq", values[0])
+                # 否则跳过：样本不足，不能判定为真正的常量约束
             elif vtype == "discrete":
-                single_constraints[name] = ("in", frozenset(values))
+                if len(values) >= MIN_CONFIDENCE:
+                    single_constraints[name] = ("in", frozenset(values))
+                # 否则跳过：样本不足，离散值集合可能因聚类误差而过拟合
             elif vtype == "sequential":
                 delta = values[1] - values[0] if len(values) > 1 else 0.0
                 single_constraints[name] = ("delta", delta)
@@ -278,8 +310,8 @@ class AprioriGuardLearner(GuardActionLearner):
                     name in vars
                     and self._check_joint_binding(
                         name,
-                        vars[name],
-                        val,
+                        vars[name],     # 实际值
+                        val,            # 期望值
                         var_types,
                         joint_rule_means,
                     )
@@ -368,6 +400,12 @@ class AprioriGuardLearner(GuardActionLearner):
         transactions: List[FrozenSet[Tuple[str, float]]] = []
         cached_means: Dict[str, float] = {}     # 保存continuous类型的均值
 
+        # 样本过多时随机采样，避免 Apriori 内存爆炸
+        MAX_TRANSACTIONS = 500
+        if len(var_instances) > MAX_TRANSACTIONS:
+            import random as _random
+            _rng = _random.Random(42)
+            var_instances = _rng.sample(var_instances, MAX_TRANSACTIONS)
 
         # 首先计算连续类型的变量的均值
         for name in var_names:
@@ -381,6 +419,10 @@ class AprioriGuardLearner(GuardActionLearner):
             for name in var_names:
                 if name not in inst:
                     continue
+                if name in self._GUARD_SKIP_VARS:
+                    continue    # 跳过非协议语义特征
+                if any(name.startswith(pfx) for pfx in self._GUARD_SKIP_PREFIX):
+                    continue    # 跳过静态常量字节，不参与关联规则挖掘
                 vtype = var_types[name]
                 if vtype in ("constant", "discrete"):
                     items.add((name, inst[name]))       # 直接用原值
@@ -394,9 +436,32 @@ class AprioriGuardLearner(GuardActionLearner):
         if not transactions:
             return [], cached_means
 
+        # 样本量过少时跳过 Apriori（全常量变量会导致 2^N 次组合爆炸）
+        MIN_SAMPLES = 4
+        if len(transactions) < MIN_SAMPLES:
+            return [], cached_means
+
+        # 唯一项过多时跳过 Apriori（2^N 项集导致内存爆炸）
+        MAX_UNIQUE_ITEMS = 12
+        unique_items = set()
+        for t in transactions:
+            unique_items.update(t)
+        if len(unique_items) > MAX_UNIQUE_ITEMS:
+            return [], cached_means
+
+        # 所有事务完全相同时跳过 Apriori：
+        # 若每条消息的字段值组合都一样，任意两个字段之间都会形成 confidence=1 的关联规则，
+        # 产生 C(n,2)*2 条平凡规则，无判别意义（单变量 eq 约束已经覆盖）。
+        unique_transactions = set(transactions)
+        if len(unique_transactions) == 1:
+            return [], cached_means
+
         # 使用Apriori算法挖掘频繁项集合关联规则
-        fis = self.core.frequent_itemsets(transactions, self.min_support)       # 频繁项集（support >= min_support）
-        rules = self.core.association_rules(fis, self.min_confidence)           # 关联规则（confidence >= min_confidence）
+        try:
+            fis = self.core.frequent_itemsets(transactions, self.min_support)       # 频繁项集（support >= min_support）
+            rules = self.core.association_rules(fis, self.min_confidence)           # 关联规则（confidence >= min_confidence）
+        except MemoryError:
+            return [], cached_means
 
         result: List[Tuple[List[str], List[float], List[str], List[float], float]] = []
         for ante, cons, _sup, conf in rules:

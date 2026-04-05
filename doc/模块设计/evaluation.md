@@ -23,6 +23,8 @@
 | Boundary Recall    | `             | 检测∩真实                                      |
 | Boundary F1        | `2PR / (P+R)` | 综合平衡，本场景 Recall 权重应略高于 Precision |
 
+
+
 ------
 
 ## 阶段二：消息聚类（DBSCAN）

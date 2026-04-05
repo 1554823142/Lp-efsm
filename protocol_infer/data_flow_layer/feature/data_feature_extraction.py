@@ -1,8 +1,12 @@
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 from protocol_infer.core.datamodel.trace import Trace
 from protocol_infer.core.datamodel.session import SessionKey
 from protocol_infer.data_flow_layer.trace_processor.context_manager import ContextExtractor, SessionContextBuilder
+
+if TYPE_CHECKING:
+    from protocol_infer.algorithm.field_detection.dynamic_field_detector import DynamicField
+
 
 class FeatureProcessor:
 
@@ -12,20 +16,32 @@ class FeatureProcessor:
         self,
         apriori_positions: Optional[List[int]] = None,
         apriori_static_items: Optional[Dict[int, int]] = None,
+        dynamic_fields: Optional[List["DynamicField"]] = None,
     ):
         self.apriori_positions = apriori_positions if apriori_positions is not None else [0, 1]
         self.apriori_static_items = apriori_static_items or {}
+        self.dynamic_fields: List["DynamicField"] = dynamic_fields or []
         self.ctx_extractor = ContextExtractor(
             byte_positions=self.apriori_positions,
             static_items=self.apriori_static_items,
+            dynamic_fields=self.dynamic_fields,
         )
         self.session_context_builder = SessionContextBuilder()
+        self._rebuild_var_order()
 
+    def _rebuild_var_order(self) -> None:
         self._var_order = (
             self._BASE_VARS
             + [f"b{p}" for p in self.apriori_positions]
             + [f"s{p}" for p in sorted(self.apriori_static_items.keys())]
+            + [f.var_name for f in self.dynamic_fields]
         )
+
+    def update_dynamic_fields(self, dynamic_fields: List["DynamicField"]) -> None:
+        """注入检测到的动态字段，同步更新 ContextExtractor 和变量顺序。"""
+        self.dynamic_fields = dynamic_fields
+        self.ctx_extractor.dynamic_fields = dynamic_fields
+        self._rebuild_var_order()
 
     def prepare_sessions(self, trace: Trace, sessions: Optional[Dict[SessionKey, List]] = None) -> Dict[SessionKey, List]:
         if sessions is None:

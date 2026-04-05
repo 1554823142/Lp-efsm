@@ -67,7 +67,9 @@ class EFSMInferencer:
             if var_instances:
                 base_guard, base_action = self.learner.learn(var_instances)
 
-            memory_guard = self.cross_learner.learn(pair_instances) if pair_instances else None
+            memory_guard, memory_action = (
+                self.cross_learner.learn(pair_instances) if pair_instances else (None, None)
+            )
 
             if base_guard is None and base_action is None and memory_guard is None:
                 continue
@@ -95,16 +97,20 @@ class EFSMInferencer:
                 vars: Dict[str, float],
                 memory=None,
                 _base_action=base_action,
+                _memory_action=memory_action,
             ) -> Dict[str, float]:
                 # 单消息内部更新
                 new_vars = _base_action(vars.copy()) if _base_action is not None else vars.copy()
 
-                # 写入memory
+                # 写入 memory（全量覆盖，原始变量值；供跨消息 guard 使用）
                 if memory is not None:
                     mem = memory.data if hasattr(memory, "data") else memory
                     if hasattr(mem, "update"):
-                        mem.update(vars)            # 全量存储，覆盖式更新(原始变量值(非预测值)写入memory)
-                return new_vars                     # 返回预测值
+                        mem.update(vars)
+                    # 若有跨消息 action，执行它（当前实现与 mem.update 等价，接口预留扩展）
+                    if _memory_action is not None:
+                        _memory_action(vars, memory)
+                return new_vars
 
             efsm.register_guard_action(tran, wrapped_guard, wrapped_action)
 

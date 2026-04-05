@@ -1,7 +1,2 @@
-from .base import Metric, Evaluator
-from .metrics import (
-    BoundaryEvaluator,
-    ClusteringEvaluator,
-    FSMEvaluator,
-    EFSMevaluator,
-)
+# evaluation module
+from .metrics import BoundaryEvaluator, ClusteringEvaluator, FSMEvaluator, EFSMevaluator

@@ -16,4 +16,4 @@ class BoundaryEvaluator(Evaluator):
         super().__init__([BoundaryPRF()])
 
     def evaluate(self, gt: Set[Tuple[int, int]], pred: Set[Tuple[int, int]]) -> Dict[str, Any]:
-        return super().evaluate(gt, pred)
+        return BoundaryPRF().compute(gt, pred)
