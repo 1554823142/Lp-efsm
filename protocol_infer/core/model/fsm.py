@@ -13,6 +13,7 @@ class Transition:
     action: Optional[Callable[[Dict], Dict]] = None
     output: Optional[str] = None
     prob: Optional[float] = None
+    confidence: Optional[str] = None
     traverse_count: int = 0
 
 
@@ -338,3 +339,4 @@ class FSM:
                 self.states[tran.src].next_states[tran.symbol] = tran.dst
             if tran.dst in self.states:
                 self.states[tran.dst].prev_states[tran.symbol] = tran.src
+
