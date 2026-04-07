@@ -138,6 +138,38 @@ class _DNP3FieldParser(_ProtocolFieldParser):
         return result
 
 
+class _EtherNetIPFieldParser(_ProtocolFieldParser):
+    """
+    EtherNet/IP 封装头字段：
+      command, encap_len, session_handle, status, options, interface_handle, timeout, item_count, service
+    """
+    name = "ETHERNET_IP"
+
+    def parse(self, payload: bytes, direction: Direction) -> Dict[str, Any]:
+        result: Dict[str, Any] = {"direction": direction.name}
+        if len(payload) < 24:
+            return result
+        command = int.from_bytes(payload[0:2], "little")
+        encap_len = int.from_bytes(payload[2:4], "little")
+        session_handle = int.from_bytes(payload[4:8], "little")
+        status = int.from_bytes(payload[8:12], "little")
+        options = int.from_bytes(payload[20:24], "little")
+        result.update({
+            "command": command,
+            "encap_len": encap_len,
+            "session_handle": session_handle,
+            "status": status,
+            "options": options,
+        })
+        if len(payload) >= 32:
+            result["interface_handle"] = int.from_bytes(payload[24:28], "little")
+            result["timeout"] = int.from_bytes(payload[28:30], "little")
+            result["item_count"] = int.from_bytes(payload[30:32], "little")
+        if len(payload) > 40:
+            result["service"] = payload[40]
+        return result
+
+
 class _GenericFieldParser(_ProtocolFieldParser):
     """
     通用解析器：提取长度、熵值和前 N 个字节位。
@@ -177,6 +209,8 @@ _PARSERS: Dict[str, _ProtocolFieldParser] = {
     "IEC104": _IEC104FieldParser(),
     "IEC60870-104": _IEC104FieldParser(),
     "DNP3": _DNP3FieldParser(),
+    "ETHERNET_IP": _EtherNetIPFieldParser(),
+    "ETHERNETIP": _EtherNetIPFieldParser(),
 }
 _GENERIC_PARSER = _GenericFieldParser()
 
@@ -321,6 +355,8 @@ class FieldExtractor:
             return f"type_{fields['type_id']:02x}_{dir_tag}"
         if "func" in fields:
             return f"func_{fields['func']:01x}_{dir_tag}"
+        if "command" in fields:
+            return f"cmd_{fields['command']:04x}_{dir_tag}"
         return f"unknown_{dir_tag}"
 
 

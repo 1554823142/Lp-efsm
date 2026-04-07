@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>P-EFSM Visualizer</title>
+  <link rel="stylesheet" href="/static/styles.css?v=4" />
+  <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+  <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+  <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="eyebrow">Protocol Infer</div>
+        <h1>P-EFSM Visualizer</h1>
+      </div>
+
+      <section class="panel controls">
+        <h2>模型学习</h2>
+        <label>协议（与数据集目录名一致）</label>
+        <select id="protocolSelect" aria-label="协议">
+          <option value="MODBUS">MODBUS</option>
+          <option value="S7COMM">S7COMM</option>
+          <option value="DNP3">DNP3</option>
+          <option value="IEC104">IEC60870-104</option>
+          <option value="ETHERNET_IP">Ethernet_IP</option>
+          <option value="MQTT">MQTT</option>
+        </select>
+
+        <label>数据集目录</label>
+        <select id="datasetSelect"></select>
+
+        <div class="grid two">
+          <div>
+            <label>max_pcaps</label>
+            <input id="maxPcapsInput" type="number" value="6" />
+          </div>
+          <div>
+            <label>max_sessions</label>
+            <input id="maxSessionsInput" type="number" value="200" />
+          </div>
+        </div>
+
+        <div>
+          <label>训练模式</label>
+          <select id="profileSelect" aria-label="训练模式">
+            <option value="fast">快速（更快训练，覆盖较少）</option>
+            <option value="balanced" selected>平衡（默认）</option>
+            <option value="thorough">充分（覆盖更高，训练更慢）</option>
+          </select>
+        </div>
+
+        <div class="grid two">
+          <div>
+            <label>test_ratio</label>
+            <input id="testRatioInput" type="number" value="0.2" step="0.1" />
+          </div>
+          <div>
+            <label>seed</label>
+            <input id="seedInput" type="number" value="42" />
+          </div>
+        </div>
+
+        <button id="learnBtn" class="primary">学习并展示 P-EFSM</button>
+        <div id="statusBox" class="status">等待学习</div>
+      </section>
+
+      <section class="panel upload-panel">
+        <h2>PCAP 回放</h2>
+        <input id="pcapFileInput" type="file" accept=".pcap,.pcapng" />
+        <button id="uploadBtn">上传并生成回放</button>
+
+        <div class="timeline-controls">
+          <button id="playBtn">播放</button>
+          <button id="pauseBtn">暂停</button>
+          <button id="stepBtn">单步</button>
+        </div>
+        <input id="timelineInput" type="range" min="0" max="0" value="0" />
+        <div class="grid two compact">
+          <div>
+            <label>速度</label>
+            <select id="speedSelect">
+              <option value="1500">0.5x</option>
+              <option value="800" selected>1x</option>
+              <option value="300">3x</option>
+              <option value="120">8x</option>
+            </select>
+          </div>
+          <div>
+            <label>当前步</label>
+            <div id="stepCounter" class="badge">0 / 0</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel summary-panel">
+        <h2>结构摘要</h2>
+        <div id="summaryList" class="kv-list"></div>
+      </section>
+
+      <section class="panel metrics-panel">
+        <h2>当前模型指标</h2>
+        <div id="datasetMetrics" class="metric-group"></div>
+        <div id="coreMetrics" class="metric-group"></div>
+      </section>
+    </aside>
+
+    <main class="main-content">
+      <section class="graph-panel panel">
+        <div class="panel-header">
+          <div>
+            <h2>状态机图</h2>
+            <p>边宽映射状态出边概率，边色映射置信度，低概率边显示为虚线。</p>
+          </div>
+          <div id="graphLegend" class="legend">
+            <span class="legend-item high">High</span>
+            <span class="legend-item medium">Medium</span>
+            <span class="legend-item low">Low</span>
+          </div>
+        </div>
+        <div id="cy"></div>
+      </section>
+
+      <section class="info-grid">
+        <section class="panel">
+          <h2>选中元素详情</h2>
+          <pre id="detailPanel" class="detail-box">点击状态或转移查看详情</pre>
+        </section>
+
+        <section class="panel">
+          <h2>当前回放步</h2>
+          <pre id="replayPanel" class="detail-box">尚未开始回放</pre>
+        </section>
+
+        <section class="panel wide">
+          <h2>回放事件列表</h2>
+          <div id="replayTable" class="replay-table"></div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js?v=4"></script>
+</body>
+</html>

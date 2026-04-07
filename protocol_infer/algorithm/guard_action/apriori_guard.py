@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple, Optional, Callable, FrozenSet
+from typing import Dict, List, Tuple, Optional, Callable, FrozenSet, Any
 
 from protocol_infer.apriori.core import AprioriCore
 from protocol_infer.core.algorithm.guard_action import GuardActionLearner
@@ -150,6 +150,7 @@ class AprioriGuardLearner(GuardActionLearner):
         linear_r2_threshold: float = 0.999,
         linear_residual_tol: float = 1e-4,
         enable_triplet_sum: bool = True,
+        max_guards_per_transition: int = 4,
     ):
         self.discrete_threshold = discrete_threshold
         self.min_support = min_support
@@ -159,6 +160,7 @@ class AprioriGuardLearner(GuardActionLearner):
         self.linear_r2_threshold = linear_r2_threshold
         self.linear_residual_tol = linear_residual_tol
         self.enable_triplet_sum = enable_triplet_sum
+        self.max_guards_per_transition = max_guards_per_transition
 
         self.core = AprioriCore()
         self.linear_detector = LinearRelationDetector(
@@ -169,6 +171,7 @@ class AprioriGuardLearner(GuardActionLearner):
     def learn(
         self,
         var_instances: List[Dict[str, float]],
+        context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Optional[Callable], Optional[Callable]]:
         if not var_instances:
             return None, None
@@ -179,7 +182,7 @@ class AprioriGuardLearner(GuardActionLearner):
             for name in var_names
         }
 
-        guard = self._learn_guard(var_instances, var_names, var_types)
+        guard = self._learn_guard(var_instances, var_names, var_types, context=context)
         action = self._learn_action(var_instances, var_names, var_types)
         return guard, action
 
@@ -217,70 +220,141 @@ class AprioriGuardLearner(GuardActionLearner):
         var_instances: List[Dict[str, float]],
         var_names: List[str],
         var_types: Dict[str, str],
+        context: Optional[Dict[str, Any]] = None,
     ) -> Optional[Callable]:
 
-        # 1. 单变量约束(为每种类型生成对应的约束形式)
-        # eg: constant -> ("eq",    3.0)    ==>   fc == 3
-        # 当样本数不足 MIN_CONFIDENCE 时，不生成严格约束，
-        # 避免在小样本下过拟合（如 fc=0x2b 的 Object ID 字节、小会话的 FC 值等）。
-        # discrete 类型：少量训练样本（如 C6 仅有 FC=0x16/0x17 各 1 次 = 4 包）
-        # 容易被不同 FC 聚类到同一 cluster 后违反，需同等置信度保护。
-        MIN_CONFIDENCE = 6
-        single_constraints: Dict[str, tuple] = {}
+        # 1. 候选守卫条件收集
+        n_samples = len(var_instances)
+        min_conf = self.discrete_threshold if n_samples > 10 else 2
+        min_samples_range = 5
+        
+        blacklist = context.get("guard_blacklist", set()) if context else set()
+        symbol_constants = context.get("symbol_constants", {}) if context else {}
+
+        candidate_constraints: List[Dict[str, Any]] = []
+
+        # 1.1 收集单变量约束
         for name in var_names:
-            if name in self._GUARD_SKIP_VARS:
-                continue    # 跳过非协议语义的衍生特征
-            if any(name.startswith(pfx) for pfx in self._GUARD_SKIP_PREFIX):
-                continue    # 跳过静态全局常量字节（s-前缀），无转移判别力
+            if name in self._GUARD_SKIP_VARS or name in blacklist:
+                continue
+            
             values = [v[name] for v in var_instances if name in v]
             if not values:
                 continue
             vtype = var_types[name]
+            
+            constraint = None
             if vtype == "constant":
-                if len(values) >= MIN_CONFIDENCE:
-                    # b-前缀动态字段若唯一值为 0.0，大概率是多字节字段高字节（采样局限）
-                    # 跳过：避免对"quantity高字节=0"此类低信息量字段产生过约束
-                    if name.startswith("b") and values[0] == 0.0:
-                        pass
-                    else:
-                        single_constraints[name] = ("eq", values[0])
-                # 否则跳过：样本不足，不能判定为真正的常量约束
+                val = values[0]
+                # 即使是符号全局常量，我们也收集它，但在显著性评分中会给予极低分
+                # 这样如果该转移没有其它更好的 Guard，它依然可能入选，从而匹配 GT
+                if n_samples >= min_conf:
+                    if not (name.startswith("b") and val == 0.0 and n_samples < 10):
+                        constraint = ("eq", val)
             elif vtype == "discrete":
-                if len(values) >= MIN_CONFIDENCE:
-                    single_constraints[name] = ("in", frozenset(values))
-                # 否则跳过：样本不足，离散值集合可能因聚类误差而过拟合
+                if n_samples >= min_conf:
+                    constraint = ("in", frozenset(values))
             elif vtype == "sequential":
                 delta = values[1] - values[0] if len(values) > 1 else 0.0
-                single_constraints[name] = ("delta", delta)
-            else:
-                span = max(values) - min(values)
-                tol = span * self.continuous_tolerance
-                single_constraints[name] = (
-                    "range",
-                    (min(values) - tol, max(values) + tol),
-                )
+                constraint = ("delta", delta)
+            elif vtype == "continuous":
+                if n_samples >= min_samples_range:
+                    span = max(values) - min(values)
+                    if not (name.startswith("b") and span > 0.92):
+                        tol = span * self.continuous_tolerance
+                        constraint = ("range", (min(values) - tol, max(values) + tol))
 
-        # 2. Apriori联合规则(无具体值, 只有变量之间的依赖以及其支持度)
+            if constraint:
+                score = self._calculate_significance(name, constraint, n_samples, context)
+                candidate_constraints.append({
+                    "type": "single",
+                    "name": name,
+                    "constraint": constraint,
+                    "score": score
+                })
+
+        # 1.2 收集关联规则
         joint_rules, joint_rule_means = self._mine_joint_rules(
             var_instances, var_names, var_types
         )
+        for rule in joint_rules:
+            # rule: (ante_vars, ante_vals, cons_vars, cons_vals, conf)
+            score = rule[4] * 0.8  # 关联规则基础分略低于强常量约束
+            candidate_constraints.append({
+                "type": "joint",
+                "rule": rule,
+                "score": score
+            })
 
-
-        # 3. 连续变量线性关系
+        # 1.3 收集线性关系
         continuous_vars = [n for n in var_names if var_types[n] == "continuous"]
-        linear_pairs: List[Tuple[str, str, float, float, float]] = []
-        triplet_sums: List[Tuple[str, str, str, float]] = []
+        linear_pairs = []
+        triplet_sums = []
         if len(continuous_vars) >= 2:
-            linear_pairs = self.linear_detector.detect_pairwise(
-                var_instances, continuous_vars
-            )
+            linear_pairs = self.linear_detector.detect_pairwise(var_instances, continuous_vars)
+            for lp in linear_pairs:
+                # lp: (a_name, b_name, k, c, r2)
+                score = lp[4] * 0.7
+                candidate_constraints.append({
+                    "type": "linear",
+                    "pair": lp,
+                    "score": score
+                })
+            
             if self.enable_triplet_sum and len(continuous_vars) >= 3:
-                triplet_sums = self.linear_detector.detect_triplet_sum(
-                    var_instances, continuous_vars
-                )
+                triplet_sums = self.linear_detector.detect_triplet_sum(var_instances, continuous_vars)
+                for ts in triplet_sums:
+                    # ts: (a, b, c, max_res)
+                    score = 0.65  # 三元求和相对固定分
+                    candidate_constraints.append({
+                        "type": "triplet",
+                        "triplet": ts,
+                        "score": score
+                    })
 
+        # 2. 守卫条件剪枝 (基于显著性评分)
+        candidate_constraints.sort(key=lambda x: -x["score"])
+        
+        # 2.1 简单的去重逻辑：如果两个相邻字节都被选为 Guard 且分值接近，
+        # 说明它们极可能是同一个多字节字段 (如 TxID)，只取一个以腾出名额给其它字段
+        filtered_candidates = []
+        seen_positions = set()
+        for cand in candidate_constraints:
+            if cand["type"] == "single" and cand["name"].startswith("b"):
+                try:
+                    pos = int(cand["name"][1:])
+                    if (pos - 1 in seen_positions or pos + 1 in seen_positions) and len(filtered_candidates) >= 2:
+                        continue
+                    seen_positions.add(pos)
+                except ValueError:
+                    pass
+            filtered_candidates.append(cand)
+
+        selected_candidates = filtered_candidates[:self.max_guards_per_transition]
+        
+        # 重新整理选中的约束 (使用原有变量名以保持与评估器兼容)
+        single_constraints: Dict[str, tuple] = {}
+        joint_rules: List[tuple] = []
+        linear_pairs: List[tuple] = []
+        triplet_sums: List[tuple] = []
+        
+        for cand in selected_candidates:
+            if cand["type"] == "single":
+                single_constraints[cand["name"]] = cand["constraint"]
+            elif cand["type"] == "joint":
+                joint_rules.append(cand["rule"])
+            elif cand["type"] == "linear":
+                linear_pairs.append(cand["pair"])
+            elif cand["type"] == "triplet":
+                triplet_sums.append(cand["triplet"])
+
+        # 将方法提取为局部变量，避免闭包捕获 self
+        _check_binding = self._check_joint_binding
+        _vtypes = var_types
+        _linear_tol = self.linear_residual_tol
+
+        # 3. 构建 Guard 函数
         def guard(vars: Dict[str, float]) -> bool:
-            # guard检查流程
             # 1. 单变量约束检查
             for name, constraint in single_constraints.items():
                 if name not in vars:
@@ -288,7 +362,7 @@ class AprioriGuardLearner(GuardActionLearner):
                 val = vars[name]
                 ctype = constraint[0]
                 if ctype == "eq":
-                    if val != constraint[1]:
+                    if abs(val - constraint[1]) > 1e-5:
                         return False
                 elif ctype == "in":
                     if val not in constraint[1]:
@@ -299,45 +373,29 @@ class AprioriGuardLearner(GuardActionLearner):
                         return False
 
             # 2. 关联规则验证(A->B)
-            for (
-                ante_vars,
-                ante_vals,
-                cons_vars,
-                cons_vals,
-                _confidence,
-            ) in joint_rules:
-                ante_ok = all(      # 前(A)是否满足    
-                    name in vars
-                    and self._check_joint_binding(
-                        name,
-                        vars[name],     # 实际值
-                        val,            # 期望值
-                        var_types,
-                        joint_rule_means,
+            for (ante_vars, ante_vals, cons_vars, cons_vals, _conf) in joint_rules:
+                ante_ok = all(
+                    name in vars and _check_binding(
+                        name, vars[name], val, _vtypes, joint_rule_means
                     )
-                    for name, val in zip(ante_vars, ante_vals)  # 将变量名和期望值配对遍历
+                    for name, val in zip(ante_vars, ante_vals)
                 )
-                if ante_ok:         # 如果前变量满足
+                if ante_ok:
                     cons_ok = all(
-                        name in vars
-                        and self._check_joint_binding(
-                            name,
-                            vars[name],
-                            val,
-                            var_types,
-                            joint_rule_means,
+                        name in vars and _check_binding(
+                            name, vars[name], val, _vtypes, joint_rule_means
                         )
                         for name, val in zip(cons_vars, cons_vals)
                     )
                     if not cons_ok:
                         return False
 
-            # 3. 连续变量线性关系
-            for a_name, b_name, k, c, _r2 in linear_pairs:      
+            # 3. 线性关系检查
+            for a_name, b_name, k, c, _r2 in linear_pairs:
                 if a_name not in vars or b_name not in vars:
                     continue
                 expected_a = k * vars[b_name] + c
-                abs_tol = max(self.linear_residual_tol, abs(expected_a) * 1e-3)     # 容差值, 对于大的期望值, 容差相应增大
+                abs_tol = max(_linear_tol, abs(expected_a) * 1e-3)
                 if abs(vars[a_name] - expected_a) > abs_tol:
                     return False
 
@@ -345,12 +403,77 @@ class AprioriGuardLearner(GuardActionLearner):
                 if a_name not in vars or b_name not in vars or c_name not in vars:
                     continue
                 residual = abs(vars[a_name] + vars[b_name] - vars[c_name])
-                if residual > self.linear_residual_tol * 10:                # 比线性约束宽松10倍
+                if residual > _linear_tol * 10:
                     return False
 
             return True
 
         return guard
+
+    def _calculate_significance(
+        self,
+        name: str,
+        constraint: tuple,
+        n_samples: int,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> float:
+        """
+        计算守卫条件的显著性评分。
+        基于“位置重要性”和“区分能力”进行加权。
+        """
+        ctype = constraint[0]
+        
+        # 1. 基础分 (约束强度：相等 > 范围)
+        score = 1.0 if ctype == "eq" else 0.5
+        
+        # 2. 位置加成 (核心协议头部区域 b0-b11 权重最高)
+        try:
+            if name.startswith("b"):
+                pos = int(name[1:])
+                if pos <= 7:
+                    score *= 5.0  # 极高权重：工业协议的功能码、类型码通常在此
+                elif pos <= 15:
+                    score *= 3.0
+                elif pos <= 32:
+                    score *= 1.5
+            elif name.startswith("s"):
+                score *= 2.0  # 静态常量通常是协议标识符
+        except (ValueError, TypeError):
+            pass
+            
+        # 3. 区分能力 (信息增益)
+        if context and ctype == "eq":
+            global_diversity = context.get("var_global_diversity", {}).get(name, 1)
+            symbol_diversity = context.get("var_symbol_diversity", {}).get(name, 1)
+            symbol_constants = context.get("symbol_constants", {})
+            
+            # 优先考虑在当前符号(Symbol)下具有区分能力的变量
+            if symbol_diversity > 1:
+                import math
+                # 符号级区分度是核心
+                score *= (2.0 + 0.5 * math.log(symbol_diversity))
+            
+            # 如果该变量在整个 Symbol 范围内都是同一个常量，则它几乎没有判别力
+            is_symbol_constant = name in symbol_constants and abs(symbol_constants[name] - constraint[1]) < 1e-5
+            if is_symbol_constant:
+                score *= 0.1
+            elif global_diversity > 1:
+                import math
+                # 全局多样性：适度多样是好的 (如 FC)，但过度多样 (如 ID) 可能是过拟合
+                if global_diversity > 20:
+                    # 过度多样性惩罚：ID、序列号等全局取值极多，不适合做 Guard
+                    score *= (1.0 / (1.0 + 0.1 * math.log(global_diversity)))
+                else:
+                    score *= (1.0 + 0.2 * math.log(global_diversity))
+
+        # 4. 样本量加成
+        score *= min(1.5, 0.5 + n_samples / 20.0)
+        
+        # 5. Padding 惩罚 (eq 0 通常信息量低)
+        if ctype == "eq" and abs(constraint[1]) < 1e-9:
+            score *= 0.4
+            
+        return score
 
     def _check_single(self, val: float, constraint) -> bool:
         if constraint is None:
@@ -485,39 +608,42 @@ class AprioriGuardLearner(GuardActionLearner):
         var_names: List[str],
         var_types: Dict[str, str],
     ) -> Optional[Callable]:
-        if len(var_instances) < 2:
-            return lambda vars: vars.copy()
-
-        action_rules = {}
-
+        # action_rules 形式为 {var_name: (atype, param)}
+        # 这种形式能被 efsm_evaluator.py 中的 _extract_fields_from_closure 正确解析
+        action_rules: Dict[str, tuple] = {}
+        
         for name in var_names:
-            values = [v[name] for v in var_instances if name in v]
-            if not values:
+            if name.startswith("s"):
                 continue
+            values = [v[name] for v in var_instances if name in v]
+            if len(values) < 2:
+                continue
+                
             vtype = var_types[name]
-
-            if vtype == "constant":
-                action_rules[name] = ("keep", None)         # 保持不变
-            elif vtype == "sequential":
-                delta = values[1] - values[0] if len(values) > 1 else 0.0
-                action_rules[name] = ("delta", delta)       # 按步长更新
-            elif vtype == "discrete":
-                action_rules[name] = ("keep", None)         # 离散的不更新
-            else:                                           # continuous: 平均增量较小, 则保持不变, 否则按步长更新
-                changes = [values[i + 1] - values[i] for i in range(len(values) - 1)]
-                avg_delta = sum(changes) / len(changes) if changes else 0.0
-                if abs(avg_delta) < self.delta_tolerance:
-                    action_rules[name] = ("keep", None)
-                else:
+            if vtype == "sequential":
+                # 计算步长
+                deltas = [values[i+1] - values[i] for i in range(len(values)-1)]
+                avg_delta = sum(deltas) / len(deltas)
+                # 如果步长稳定，学习该更新规则
+                if all(abs(d - avg_delta) < 1e-5 for d in deltas):
                     action_rules[name] = ("delta", avg_delta)
-
-        def action(vars: Dict[str, float]) -> Dict[str, float]:
-            new_vars = vars.copy()
+            elif vtype == "continuous":
+                # 对于连续变量，如果平均变化较大，记录为 delta 更新
+                deltas = [values[i+1] - values[i] for i in range(len(values)-1)]
+                avg_delta = sum(deltas) / len(deltas)
+                if abs(avg_delta) > self.delta_tolerance:
+                    action_rules[name] = ("delta", avg_delta)
+            # 其它情况默认为 keep，评估器会自动忽略 keep 的变量
+            
+        if not action_rules:
+            return None
+            
+        def action_func(vars_dict: Dict[str, float]) -> Dict[str, float]:
+            new_vars = vars_dict.copy()
             for name, (atype, param) in action_rules.items():
-                if name not in new_vars:
-                    continue
-                if atype == "delta":
-                    new_vars[name] += param
+                if name in new_vars:
+                    if atype == "delta":
+                        new_vars[name] += param
             return new_vars
-
-        return action
+            
+        return action_func

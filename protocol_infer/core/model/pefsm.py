@@ -11,7 +11,7 @@ class PEFSM(EFSM):
     概率扩展有限状态机。
     在 EFSM 结构不变的基础上，为转移补充：
         - traverse_count: 观测次数
-        - prob: 条件概率 P(dst | src, symbol)
+        - prob: 状态出边概率 P(transition | src)
         - confidence: high / medium / low
     """
 
@@ -49,9 +49,9 @@ class PEFSM(EFSM):
         return "low"
 
     def compute_probabilities(self) -> None:
-        grouped: Dict[Tuple[int, str], List[Transition]] = defaultdict(list)
+        grouped: Dict[int, List[Transition]] = defaultdict(list)
         for tran in self.transitions:
-            grouped[(tran.src, tran.symbol)].append(tran)
+            grouped[tran.src].append(tran)
 
         for transitions in grouped.values():
             total = sum(max(0, t.traverse_count) for t in transitions)
@@ -67,19 +67,17 @@ class PEFSM(EFSM):
                 confidence = self.assess_confidence(tran.traverse_count, total)
                 self.set_transition_stats(tran, tran.traverse_count, prob, confidence)
 
-    def get_transition_probability(
-        self,
-        src: int,
-        symbol: str,
-        dst: int,
-    ) -> float:
-        for tran in self._by_state_input.get((src, symbol), []):
-            if tran.dst == dst:
-                return tran.prob if tran.prob is not None else 0.0
+    def get_transition_probability(self, src: int, dst: int, symbol: Optional[str] = None) -> float:
+        for tran in self.transitions:
+            if tran.src != src or tran.dst != dst:
+                continue
+            if symbol is not None and tran.symbol != symbol:
+                continue
+            return tran.prob if tran.prob is not None else 0.0
         return 0.0
 
-    def get_probabilistic_transitions(self, src: int, symbol: str) -> List[Transition]:
-        transitions = list(self._by_state_input.get((src, symbol), []))
+    def get_probabilistic_transitions(self, src: int) -> List[Transition]:
+        transitions = [tran for tran in self.transitions if tran.src == src]
         return sorted(
             transitions,
             key=lambda t: (
@@ -153,6 +151,6 @@ class PEFSM(EFSM):
                 conf = tran.confidence if tran.confidence is not None else "unknown"
                 lines.append(
                     f"    --[{tran.symbol}]--> {tran.dst} "
-                    f"(count={tran.traverse_count}, prob={prob:.4f}, conf={conf})"
+                    f"(count={tran.traverse_count}, state_prob={prob:.4f}, conf={conf})"
                 )
         return "\n".join(lines)

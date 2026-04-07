@@ -9,6 +9,7 @@
 4. 从 GT 规范库（模块二）获取对应协议的 ProtocolGT
 5. 用 EnhancedEFSMEvaluator（模块三）计算四个维度指标
 6. 同时运行原有 EFSMevaluator 以保留历史指标
+7. 端到端 Trace 重放：在测试集（无则训练集）上用 PEFSM + ReplayBuilder 统计会话级/步级重放成功率（与 Web 一致）
 
 命令行用法
 ----------
@@ -32,7 +33,7 @@ import json
 import os
 import random
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from protocol_infer.core.datamodel.event import MessageEvent, Direction
@@ -45,13 +46,18 @@ from protocol_infer.data_flow_layer.feature.data_feature_extraction import Featu
 from protocol_infer.evaluation.supervised_eval import (
     _looks_like_capture,
     _group_sessions,
+    _split_long_sessions,
     _split_keys,
     _mutate_negative,
     _build_symbol_var_sequences,
     ModbusTCPLabeler,
     IEC104Labeler,
     DNP3Labeler,
+    EtherNetIPLabeler,
+    MQTTLabeler,
+    S7CommLabeler,
     ProtocolLabeler,
+    filter_events_for_protocol,
 )
 from protocol_infer.evaluation.metrics import EFSMevaluator
 from protocol_infer.evaluation.field_extractor import FieldExtractor, SessionTrace
@@ -69,6 +75,11 @@ _LABELERS: Dict[str, ProtocolLabeler] = {
     "IEC104": IEC104Labeler(),
     "IEC60870-104": IEC104Labeler(),
     "DNP3": DNP3Labeler(),
+    "ETHERNET_IP": EtherNetIPLabeler(),
+    "ETHERNETIP": EtherNetIPLabeler(),
+    "S7COMM": S7CommLabeler(),
+    "S7": S7CommLabeler(),
+    "MQTT": MQTTLabeler(),
 }
 
 _PROTOCOL_DIRS: Dict[str, str] = {
@@ -77,6 +88,9 @@ _PROTOCOL_DIRS: Dict[str, str] = {
     "IEC104": "IEC60870-104",
     "IEC60870-104": "IEC60870-104",
     "DNP3": "DNP3",
+    "ETHERNET_IP": "Ethernet_IP",
+    "ETHERNETIP": "Ethernet_IP",
+    "MQTT": "MQTT",
 }
 
 
@@ -89,18 +103,26 @@ class FullEvalResult:
     protocol: str
     train_sessions: int
     test_sessions: int
+    # 划分 train/test 前（且 max_sessions 截断后）的 TCP 会话条数
+    total_sessions: int
     # 原有历史指标（与 EFSMevaluator 兼容）
     legacy_efsm: Dict[str, float]
     # 新四维指标
     enhanced_efsm: Dict[str, float]
+    # 端到端重放：PEFSM + ReplayBuilder，与 Web 一致；replay_on 为 test / train / none / skipped
+    replay_on: str = "none"
+    replay_metrics: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "protocol": self.protocol,
             "train_sessions": self.train_sessions,
             "test_sessions": self.test_sessions,
+            "total_sessions": self.total_sessions,
             "legacy_efsm": self.legacy_efsm,
             "enhanced_efsm": self.enhanced_efsm,
+            "replay_on": self.replay_on,
+            "replay_metrics": dict(self.replay_metrics),
         }
 
 
@@ -108,17 +130,32 @@ class FullEvalResult:
 # 核心函数
 # ---------------------------------------------------------------------------
 
+_MAX_SINGLE_PCAP_BYTES = 12 * 1024 * 1024  # 单文件限制 12MB，避免巨型文件卡死训练
+
 def _collect_pcaps(data_dir: str, max_pcaps: int) -> List[str]:
     """从目录中收集有效的 PCAP 文件路径。"""
     paths: List[str] = []
     if not os.path.isdir(data_dir):
         return paths
-    for fn in sorted(os.listdir(data_dir)):
+    candidates: List[Tuple[int, str, str]] = []
+    for fn in os.listdir(data_dir):
         if not fn.lower().endswith(".pcap"):
             continue
         full = os.path.join(data_dir, fn)
-        if _looks_like_capture(full):
-            paths.append(full)
+        if not _looks_like_capture(full):
+            continue
+        try:
+            size = os.path.getsize(full)
+            if size > _MAX_SINGLE_PCAP_BYTES:
+                continue
+        except OSError:
+            continue
+        candidates.append((size, fn, full))
+
+    # 以“更小文件优先”缩短解析时间，同时尝试在预算内包含更多文件以增加会话多样度
+    candidates.sort(key=lambda item: (item[0], item[1].lower()))
+    for _size, _name, full in candidates:
+        paths.append(full)
         if len(paths) >= max_pcaps:
             break
     return paths
@@ -174,17 +211,23 @@ def run_full_evaluation(
             print(f"[WARN] Failed to parse {p}: {exc}", file=sys.stderr)
     if not events:
         raise RuntimeError("No events parsed from any PCAP file.")
+    events = filter_events_for_protocol(proto_upper, events)
     events.sort(key=lambda e: e.timestamp)
     trace = Trace(events=events)
 
     # ---- 4. 会话分组 & 切分 ----
     sessions_all = _group_sessions(trace)
+    # 仅在会话样本极少时启用长会话分段，避免对本来会话充足的数据集引入额外切分噪声。
+    if len(sessions_all) < 4:
+        sessions_all = _split_long_sessions(sessions_all)
     keys = list(sessions_all.keys())
     if len(keys) > max_sessions:
         rng = random.Random(seed)
         rng.shuffle(keys)
         keys = keys[:max_sessions]
         sessions_all = {k: sessions_all[k] for k in keys}
+
+    total_sessions = len(sessions_all)
 
     if len(sessions_all) < 2:
         only_key = next(iter(sessions_all.keys()))
@@ -279,12 +322,50 @@ def run_full_evaluation(
         )
         enhanced_res = eval_result.to_dict()
 
+    # ---- 10. 端到端 Trace 重放（PEFSM + ReplayBuilder，与 Web 回放一致）----
+    replay_on = "none"
+    replay_metrics: Dict[str, Any] = {}
+    try:
+        from protocol_infer.probabilistic_layer.pipeline import ProbabilisticPipeline
+        from protocol_infer.visualization.replay import ReplayBuilder, summarize_replay_by_session
+
+        if train_trace.abstract_messages:
+            pefsm = ProbabilisticPipeline().run(efsm=efsm, trace=train_trace)
+            if test_sessions:
+                test_events: List[MessageEvent] = []
+                for _sk, evs in test_sessions.items():
+                    test_events.extend(evs)
+                test_events.sort(key=lambda e: e.timestamp)
+                replay_trace = Trace(events=test_events)
+                df.materialize_abstract_messages(
+                    replay_trace,
+                    sessions=test_sessions,
+                    precomputed_sess_features=None,
+                    apriori_positions=cf.get_apriori_positions(),
+                    skip_dynamic_detection=True,
+                )
+                replay_on = "test"
+            else:
+                replay_trace = train_trace
+                replay_on = "train"
+            steps = ReplayBuilder().build(pefsm, replay_trace)
+            replay_metrics = summarize_replay_by_session(steps)
+        else:
+            replay_on = "skipped_no_abstract"
+    except Exception as exc:
+        print(f"[WARN] Trace replay metrics failed: {exc}", file=sys.stderr)
+        replay_on = "error"
+        replay_metrics = {}
+
     return FullEvalResult(
         protocol=proto_upper,
         train_sessions=len(train_sessions),
         test_sessions=len(test_sessions),
+        total_sessions=total_sessions,
         legacy_efsm=legacy_res,
         enhanced_efsm=enhanced_res,
+        replay_on=replay_on,
+        replay_metrics=replay_metrics,
     )
 
 
@@ -411,12 +492,23 @@ def main(argv: Optional[List[str]] = None) -> None:
 def _print_result(r: FullEvalResult) -> None:
     print(f"\n{'='*60}")
     print(f"Protocol : {r.protocol}")
+    print(f"Total sessions (after cap): {r.total_sessions}")
     print(f"Train sessions : {r.train_sessions}")
     print(f"Test  sessions : {r.test_sessions}")
     print(f"\n--- Legacy EFSM Metrics ---")
     for k, v in sorted(r.legacy_efsm.items()):
         print(f"  {k:35s}: {v:.4f}")
-    print(f"\n--- Enhanced EFSM Metrics ---")
+    print(f"\n--- End-to-end Trace Replay (primary) ---")
+    print(f"  replay_eval_on                      : {r.replay_on}")
+    if r.replay_metrics:
+        for k, v in sorted(r.replay_metrics.items()):
+            if isinstance(v, float):
+                print(f"  {k:35s}: {v:.4f}")
+            else:
+                print(f"  {k:35s}: {v}")
+    else:
+        print("  (no replay metrics)")
+    print(f"\n--- Enhanced EFSM / GT (reference) ---")
     if r.enhanced_efsm:
         for k, v in sorted(r.enhanced_efsm.items()):
             print(f"  {k:35s}: {v:.4f}")

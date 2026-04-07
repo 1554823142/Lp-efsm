@@ -13,25 +13,32 @@ class KTailStateMerger(StateMerger):
             那么这两个状态可以合并
         '''
 
-        # 1.计算每个状态的sig
-        sig_map = {}        # sid->sig
+        # 迭代合并，直到没有状态可以合并
+        while True:
+            initial_state_count = len(fsm.states)
+
+            # 1.计算每个状态的sig
+            sig_map = {}        # sid->sig
+            for sid in fsm.states:
+                sig_map[sid] = self.signiture_compute(sid, self.k, fsm)
+
+            # 2.按照sig分桶
+            group_buckets = {}      # sig->List[sid]
+            for sid, sig in sig_map.items():
+                group_buckets.setdefault(sig, []).append(sid)
+
+            # 3.合并每一组
+            merged_any = False
+            for group in group_buckets.values():
+                if len(group) > 1:
+                    self.merge_group(group, fsm)
+                    merged_any = True
+
+            fsm.remove_duplicate_transitions()      # 将k-tail合并后的冗余相同转移边去除
+
+            if not merged_any or len(fsm.states) == initial_state_count:
+                break
         
-        for sid in fsm.states:
-            sig_map[sid] = self.signiture_compute(sid, self.k, fsm)
-
-        # 2.按照sig分桶
-        group = {}      # sig->List[sid]
-
-        for sid, sig in sig_map.items():
-            group.setdefault(sig, []).append(sid)
-
-
-        # 3.合并每一组
-        for group in group.values():
-            if len(group) > 1:
-                self.merge_group(group, fsm)
-
-        fsm.remove_duplicate_transitions()      # 将k-tail合并后的冗余相同转移边去除
         return fsm
 
     def signiture_compute(self, sid: int, k: int, fsm: FSM) ->tuple:

@@ -210,12 +210,37 @@ def _extract_fields_from_closure(fn: Callable, _depth: int = 0) -> Set[str]:
                     fields.add(k)
             elif isinstance(val, list):
                 for item in val:
-                    if isinstance(item, (list, tuple)) and len(item) >= 3:
-                        for sublist in (item[0], item[2]):  # ante_vars, cons_vars
-                            if isinstance(sublist, (list, tuple)):
-                                for name in sublist:
-                                    if isinstance(name, str) and not name.startswith("_") and name not in _GENERIC_FUNC_NAMES:
+                    if not isinstance(item, (list, tuple)):
+                        continue
+                    L = len(item)
+                    # Apriori joint_rules: (ante_vars, ante_vals, cons_vars, cons_vals, conf)
+                    if L >= 5 and isinstance(item[0], (list, tuple)):
+                        for idx in (0, 2):
+                            sub = item[idx]
+                            if isinstance(sub, (list, tuple)):
+                                for name in sub:
+                                    if (
+                                        isinstance(name, str)
+                                        and name
+                                        and not name.startswith("_")
+                                        and name not in _GENERIC_FUNC_NAMES
+                                    ):
                                         fields.add(name)
+                    # Apriori linear_pairs: (a_name, b_name, k, c, r2)
+                    elif L == 5 and isinstance(item[0], str) and isinstance(item[1], str):
+                        for name in (item[0], item[1]):
+                            if name not in _GENERIC_FUNC_NAMES:
+                                fields.add(name)
+                    # Apriori triplet_sums: (a, b, c, max_res)
+                    elif L == 4 and isinstance(item[0], str) and isinstance(item[1], str) and isinstance(item[2], str):
+                        for name in item[:3]:
+                            if name not in _GENERIC_FUNC_NAMES:
+                                fields.add(name)
+                    # CrossMessage identity_rules (dst, src) / 其它 (str, str)
+                    elif L == 2 and isinstance(item[0], str) and item[0] not in _GENERIC_FUNC_NAMES:
+                        fields.add(item[0])
+                        if isinstance(item[1], str) and item[1] not in _GENERIC_FUNC_NAMES:
+                            fields.add(item[1])
             elif callable(val):
                 # 递归进嵌套函数
                 fields.update(_extract_fields_from_closure(val, _depth + 1))
@@ -268,6 +293,8 @@ class GuardFieldEvaluator:
         raw_inferred = _extract_inferred_guard_fields(efsm)
         # 将字节位名（b7, b6, ...）归一化为语义字段名（fc, unit_id, ...）
         inferred_fields = normalize_var_names(raw_inferred, gt.protocol)
+
+        # print(f"DEBUG [{gt.protocol}]: raw={raw_inferred} -> norm={inferred_fields}")
 
         tp_set = inferred_fields & gt_fields
         fp_set = inferred_fields - gt_fields

@@ -9,7 +9,7 @@ class CrossMessageLearner:
         self,
         r2_threshold: float = 0.999,        # 线性推导规则的接受门槛
         residual_tol: float = 1e-4,         # 两类规则的精度容差
-        min_samples: int = 4,               # 学习任何规则所需的最少配对样本数(避免误判)
+        min_samples: int = 8,               # 学习任何规则所需的最少配对样本数(避免误判)
         delta_tolerance: float = 1e-6,      # 序列递增规则的步长一致性判断
     ):
         self.r2_threshold = r2_threshold
@@ -20,6 +20,7 @@ class CrossMessageLearner:
     def learn(
         self,
         pair_instances: List[Tuple[Dict[str, float], Dict[str, float]]],        # (src, dst)相邻两条消息的配对数据
+        context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[
         Optional[Callable[[Dict[str, Any], Optional[Dict[str, Any]]], bool]],
         Optional[Callable[[Dict[str, Any], Optional[Dict[str, Any]]], Dict[str, Any]]],
@@ -37,7 +38,7 @@ class CrossMessageLearner:
         # s-前缀（如 s0, s2）是全局静态常量（值恒为某固定值，如 0），
         # 作为 src 变量时会与任何恰好值也为 0 的 dst 变量产生假恒等规则。
         # direction/entropy/len 是协议无关的衍生特征，不应参与跨消息规则学习。
-        _SKIP_PREFIX = ("s",)
+        _SKIP_PREFIX = ("s", "dyn_", "b")
         _SKIP_VARS = {"direction", "entropy", "len"}
         src_names = {
             n for n in src_names
@@ -152,6 +153,14 @@ class CrossMessageLearner:
 
             return True
 
+
+        # 控制规则规模，减少 guard 冗余与过拟合
+        MAX_IDENTITY = 8
+        MAX_SEQ = 8
+        MAX_LINEAR = 4
+        identity_rules = identity_rules[:MAX_IDENTITY]
+        seq_rules = seq_rules[:MAX_SEQ]
+        linear_rules = sorted(linear_rules, key=lambda x: -x[4])[:MAX_LINEAR]
 
         # 都不满足则说明无可学习的跨消息依赖
         if not identity_rules and not seq_rules and not linear_rules:

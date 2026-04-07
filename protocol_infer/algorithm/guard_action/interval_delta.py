@@ -1,8 +1,12 @@
-from typing import Dict, List, Tuple, Optional, Callable
+from typing import Any, Dict, List, Tuple, Optional, Callable
 from protocol_infer.core.algorithm.guard_action import GuardActionLearner
 
 class IntervalDeltaLearner(GuardActionLearner):
-    def learn(self, var_instances: List[Dict[str, float]]) -> Tuple[Optional[Callable], Optional[Callable]]:
+    def learn(
+        self,
+        var_instances: List[Dict[str, float]],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Optional[Callable], Optional[Callable]]:
         if not var_instances:
             return None, None
         var_names = list(var_instances[0].keys())       # 第一个var的keys作为所有var的keys

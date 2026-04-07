@@ -44,9 +44,11 @@ class IEC104Labeler(ProtocolLabeler):
 
     def label(self, ev: MessageEvent) -> str:
         payload = ev.payload or b""
-        if len(payload) < 7 or payload[0] != 0x68:
+        if len(payload) < 2 or payload[0] != 0x68:
             return f"unknown_{_dir_tag(ev.direction)}"
-        tid = payload[6]
+        tid = 0
+        if len(payload) >= 3 and (payload[2] & 0x01) == 0 and len(payload) >= 7:
+            tid = payload[6]
         return f"type_{tid:02x}_{_dir_tag(ev.direction)}"
 
 
@@ -61,6 +63,121 @@ class DNP3Labeler(ProtocolLabeler):
         func = ctrl & 0x0F
         prm = 1 if (ctrl & 0x40) else 0
         return f"func_{func:01x}_prm{prm}_{_dir_tag(ev.direction)}"
+
+
+class S7CommLabeler(ProtocolLabeler):
+    """S7comm / ISO-on-TCP（TPKT 0x03 0x00）；与 filter 规则一致。"""
+
+    name = "S7COMM"
+
+    def label(self, ev: MessageEvent) -> str:
+        payload = ev.payload or b""
+        tag = _dir_tag(ev.direction)
+        if len(payload) < 4 or payload[0] != 0x03 or payload[1] != 0x00:
+            return f"unknown_{tag}"
+        if len(payload) > 7 and payload[7] == 0x32:
+            ros = payload[18] if len(payload) > 18 else -1
+            return f"s7_ros_{ros:02x}_{tag}" if ros >= 0 else f"s7_pdu_{tag}"
+        return f"tpkt_{tag}"
+
+
+class EtherNetIPLabeler(ProtocolLabeler):
+    name = "ETHERNET_IP"
+
+    _KNOWN_COMMANDS = {0x0004, 0x0063, 0x0064, 0x0065, 0x0066, 0x006F, 0x0070, 0x0072}
+
+    def label(self, ev: MessageEvent) -> str:
+        payload = ev.payload or b""
+        if len(payload) < 24:
+            return f"unknown_{_dir_tag(ev.direction)}"
+        command = int.from_bytes(payload[0:2], byteorder="little", signed=False)
+        if command not in self._KNOWN_COMMANDS:
+            return f"unknown_{_dir_tag(ev.direction)}"
+        return f"cmd_{command:04x}_{_dir_tag(ev.direction)}"
+
+
+class MQTTLabeler(ProtocolLabeler):
+    name = "MQTT"
+
+    def label(self, ev: MessageEvent) -> str:
+        payload = ev.payload or b""
+        if not payload:
+            return f"unknown_{_dir_tag(ev.direction)}"
+        msg_type = (payload[0] >> 4) & 0x0F
+        if not (1 <= msg_type <= 14):
+            return f"unknown_{_dir_tag(ev.direction)}"
+        return f"mqtt_{msg_type:02x}_{_dir_tag(ev.direction)}"
+
+
+def _normalize_protocol_name(protocol: str) -> str:
+    key = (protocol or "").upper().replace(" ", "").replace("-", "").replace("/", "").replace(".", "")
+    aliases = {
+        "MODBUS": "MODBUS",
+        "MODBUSTCP": "MODBUS",
+        "S7COMM": "S7COMM",
+        "DNP3": "DNP3",
+        "IEC104": "IEC60870-104",
+        "IEC60870104": "IEC60870-104",
+        "ETHERNETIP": "ETHERNET_IP",
+        "ETHERNET_IP": "ETHERNET_IP",
+        "MQTT": "MQTT",
+    }
+    return aliases.get(key, protocol.upper())
+
+
+def _mqtt_remaining_length(payload: bytes) -> Optional[int]:
+    multiplier = 1
+    value = 0
+    for idx in range(1, min(len(payload), 5)):
+        encoded = payload[idx]
+        value += (encoded & 0x7F) * multiplier
+        if (encoded & 0x80) == 0:
+            return value
+        multiplier *= 128
+    return None
+
+
+def _event_matches_protocol(protocol: str, ev: MessageEvent) -> bool:
+    payload = ev.payload or b""
+    ports = {int(ev.session_key.port1), int(ev.session_key.port2)}
+    proto = _normalize_protocol_name(protocol)
+
+    if proto == "MODBUS":
+        return len(payload) >= 8 and payload[2:4] == b"\x00\x00" and (502 in ports or payload[6] <= 247)
+
+    if proto == "S7COMM":
+        # TPKT 头固定 0x03 0x00；标准端口 102。短帧/分片可能没有 0x32 协议 ID，勿全部过滤掉。
+        if len(payload) < 4 or payload[0] != 0x03 or payload[1] != 0x00:
+            return False
+        if 102 in ports:
+            return True
+        return len(payload) >= 8 and payload[7] == 0x32
+
+    if proto == "DNP3":
+        return len(payload) >= 4 and payload[0] == 0x05 and payload[1] == 0x64
+
+    if proto == "IEC60870-104":
+        return len(payload) >= 2 and payload[0] == 0x68
+
+    if proto == "ETHERNET_IP":
+        if len(payload) < 24:
+            return False
+        command = int.from_bytes(payload[0:2], byteorder="little", signed=False)
+        return 44818 in ports and command in EtherNetIPLabeler._KNOWN_COMMANDS
+
+    if proto == "MQTT":
+        if not payload:
+            return False
+        msg_type = payload[0] >> 4
+        remaining = _mqtt_remaining_length(payload)
+        return msg_type in range(1, 15) and remaining is not None and (1883 in ports or 8883 in ports or len(payload) >= 2)
+
+    return True
+
+
+def filter_events_for_protocol(protocol: str, events: Sequence[MessageEvent]) -> List[MessageEvent]:
+    filtered = [ev for ev in events if _event_matches_protocol(protocol, ev)]
+    return filtered if filtered else list(events)
 
 
 def _looks_like_capture(path: str) -> bool:
@@ -111,6 +228,60 @@ def _split_keys(keys: List[SessionKey], test_ratio: float, seed: int) -> Tuple[L
     if not train and test:
         train, test = test, []
     return train, test
+
+
+def _split_long_sessions(
+    sessions: Dict[SessionKey, List[MessageEvent]],
+    target_sessions: int = 12,
+    min_chunk_len: int = 12,
+) -> Dict[SessionKey, List[MessageEvent]]:
+    # 工业数据集常只有 1~2 条长 TCP 链接，若不切分则 train/test 样本极度匮乏
+    # 即使 session 数量 > 4，如果平均长度很大，也建议切分
+    avg_len = sum(len(evs) for evs in sessions.values()) / len(sessions) if sessions else 0
+    if len(sessions) >= target_sessions and avg_len < min_chunk_len * 3:
+        return sessions
+
+    total_events = sum(len(evs) for evs in sessions.values())
+    if total_events <= len(sessions):
+        return sessions
+
+    desired_chunk = max(min_chunk_len, total_events // target_sessions)
+    expanded: Dict[SessionKey, List[MessageEvent]] = {}
+
+    for sk, evs in sessions.items():
+        if len(evs) < desired_chunk * 2:
+            expanded[sk] = evs
+            continue
+
+        chunk_index = 0
+        start = 0
+        while start < len(evs):
+            end = min(len(evs), start + desired_chunk)
+            chunk = evs[start:end]
+            if len(chunk) < min_chunk_len and expanded:
+                last_key = next(reversed(expanded))
+                expanded[last_key].extend(chunk)
+                break
+            chunk_key = SessionKey(
+                ip1=sk.ip1,
+                port1=sk.port1,
+                ip2=f"{sk.ip2}#chunk{chunk_index}",
+                port2=sk.port2,
+                protocol=sk.protocol,
+            )
+            expanded[chunk_key] = [
+                MessageEvent(
+                    session_key=chunk_key,
+                    timestamp=ev.timestamp,
+                    payload=ev.payload,
+                    direction=ev.direction,
+                )
+                for ev in chunk
+            ]
+            chunk_index += 1
+            start = end
+
+    return expanded
 
 
 def _encode_strs(xs: List[str]) -> List[int]:
@@ -233,9 +404,10 @@ def evaluate_protocol_pcaps(
     if not events:
         raise RuntimeError(f"no parsable capture files for {labeler.name}")
     events.sort(key=lambda e: e.timestamp)
+    events = filter_events_for_protocol(labeler.name, events)
     trace = Trace(events=events)
 
-    sessions_all = _group_sessions(trace)
+    sessions_all = _split_long_sessions(_group_sessions(trace))
     keys = list(sessions_all.keys())
     if len(keys) > max_sessions:
         rng = random.Random(seed)

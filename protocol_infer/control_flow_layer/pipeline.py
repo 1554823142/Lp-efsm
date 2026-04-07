@@ -17,7 +17,7 @@ class ControlFlowPipeline:
         self,
         algorithm: str = "kmeans",
         n_clusters: Union[int, str] = "auto",
-        k: int = 4,
+        k: int = 2,
         eps: float = 0.5,
         min_samples: int = 5,
         use_apriori: bool = True

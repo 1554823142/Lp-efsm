@@ -22,7 +22,7 @@ class KMeansClustering(ClusteringAlgorithm):
         n_clusters: Union[int, str] = "auto",
         random_state: Optional[int] = 42,
         k_min: int = 2,
-        k_max: int = 20,
+        k_max: int = 8,
     ):
         self.n_clusters = n_clusters
         self.random_state = random_state
@@ -38,11 +38,18 @@ class KMeansClustering(ClusteringAlgorithm):
     def _select_k(self, X: np.ndarray) -> int:
         """用轮廓系数在 [k_min, k_max] 中选最优 K。"""
         n = len(X)
+        if n <= 1:
+            return max(1, n)
         # 样本数不足时直接返回能支持的最大 K
-        k_lo = self.k_min
+        k_lo = max(2, self.k_min)
+        # 工业流量类型多；仅靠轮廓系数时 K 常被压到 2（与方向/长度共线），FSM 过粗。
+        if n >= 48:
+            floor_k = int(round(n ** (1.0 / 3.0)))
+            floor_k = max(3, min(self.k_max - 1, floor_k))
+            k_lo = max(k_lo, floor_k)
         k_hi = min(self.k_max, n - 1)   # silhouette 要求 K < n_samples
         if k_hi < k_lo:
-            return max(k_lo, 2)
+            return max(1, min(n, self.k_max))
 
         best_k = k_lo
         best_score = -2.0
@@ -68,11 +75,14 @@ class KMeansClustering(ClusteringAlgorithm):
 
     def fit(self, X: List[List[float]]) -> None:
         X_arr = np.array(X, dtype=float)
+        n_samples = len(X_arr)
+        if n_samples == 0:
+            raise ValueError("KMeansClustering requires at least one sample")
 
         if self.n_clusters == "auto":
             self.best_k_ = self._select_k(X_arr)
         else:
-            self.best_k_ = int(self.n_clusters)
+            self.best_k_ = max(1, min(int(self.n_clusters), n_samples))
 
         self.model = KMeans(
             n_clusters=self.best_k_,

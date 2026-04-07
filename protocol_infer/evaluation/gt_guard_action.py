@@ -407,6 +407,56 @@ def build_dnp3_gt() -> ProtocolGT:
     return gt
 
 
+def build_ethernet_ip_gt() -> ProtocolGT:
+    """
+    EtherNet/IP GT 规范。
+
+    消息类型命名与 EtherNetIPLabeler 输出对齐：
+      cmd_0065_c2s / cmd_0065_s2c / ...
+    """
+    gt = ProtocolGT(protocol="ETHERNET_IP")
+
+    gt.transitions.append(TransitionSpec(
+        src_types={"cmd_0065_c2s"},
+        dst_types={"cmd_0065_s2c"},
+        guard=GuardSpec(
+            constraints=[
+                FieldConstraint("command", eq=0x0065),
+                FieldConstraint("session_handle", eq=0),
+            ],
+            description="RegisterSession request (command=0x0065, session_handle=0)",
+        ),
+        action=ActionSpec(
+            changed_vars={"session_handle"},
+            invariant_vars={"command"},
+            description="server assigns a non-zero session_handle",
+        ),
+        label="register_session",
+    ))
+
+    for command, label in ((0x006F, "send_rr_data"), (0x0070, "send_unit_data"), (0x0063, "list_identity")):
+        cmd_hex = f"{command:04x}"
+        gt.transitions.append(TransitionSpec(
+            src_types={f"cmd_{cmd_hex}_c2s"},
+            dst_types={f"cmd_{cmd_hex}_s2c"},
+            guard=GuardSpec(
+                constraints=[
+                    FieldConstraint("command", eq=command),
+                    FieldConstraint("session_handle", in_range=(0, 0xFFFFFFFF), absent_ok=True),
+                ],
+                description=f"EtherNet/IP encapsulation command 0x{cmd_hex}",
+            ),
+            action=ActionSpec(
+                changed_vars={"status"},
+                invariant_vars={"command", "session_handle"},
+                description="response preserves command/session_handle and reports status",
+            ),
+            label=label,
+        ))
+
+    return gt
+
+
 def build_iec104_gt() -> ProtocolGT:
     """
     IEC 60870-5-104 GT 规范。
@@ -520,6 +570,8 @@ GT_BUILDERS: Dict[str, Callable[[], ProtocolGT]] = {
     "DNP3": build_dnp3_gt,
     "IEC104": build_iec104_gt,
     "IEC60870-104": build_iec104_gt,
+    "ETHERNET_IP": build_ethernet_ip_gt,
+    "ETHERNETIP": build_ethernet_ip_gt,
 }
 
 
@@ -551,7 +603,7 @@ PROTOCOL_VAR_ALIASES: Dict[str, Dict[str, Union[str, List[str]]]] = {
         "b6": "unit_id",
         "b7": "fc",
         # PDU（请求时 b8/b9=start_addr，响应时 b8=byte_count；方向无感知时两者均计）
-        "b8": ["start_addr", "byte_count"],
+        "b8": ["start_addr", "byte_count", "exception_code"],
         "b9": "start_addr",
         "b10": "quantity",    "b11": "quantity",
         # 静态项变量名（s{byte_pos}），与对应字节位同义
@@ -561,10 +613,24 @@ PROTOCOL_VAR_ALIASES: Dict[str, Dict[str, Union[str, List[str]]]] = {
         "s6": "unit_id",
     },
     "DNP3": {
+        # 链路层：与 DNP3Labeler / FieldExtractor 的 func、prm（由 ctrl 解析）对齐
         "b2": "length",
-        "b3": "ctrl",
-        "b4": "dest",  "b5": "dest",
-        "b6": "src",   "b7": "src",
+        "b3": ["func", "prm"],
+        "ctrl": ["func", "prm"],
+        "b4": "dest",
+        "b5": "dest",
+        "b6": "src",
+        "b7": "src",
+        "s2": "length",
+        "s3": ["func", "prm"],
+        "s4": "dest",
+        "s5": "dest",
+        "s6": "src",
+        "s7": "src",
+        "func": "func",
+        "prm": "prm",
+        "dest": "dest",
+        "src": "src",
     },
     "IEC104": {
         "b1": "apdu_len",
@@ -572,6 +638,37 @@ PROTOCOL_VAR_ALIASES: Dict[str, Dict[str, Union[str, List[str]]]] = {
         "b3": "ctrl2",
         "b6": "type_id",
         "b7": "vsq",
+        "s1": "apdu_len",
+        "s2": "ctrl1",
+        "s3": "ctrl2",
+        "s6": "type_id",
+        "s7": "vsq",
+    },
+    "IEC60870-104": {
+        "b1": "apdu_len",
+        "b2": "ctrl1",
+        "b3": "ctrl2",
+        "b6": "type_id",
+        "b7": "vsq",
+        "s1": "apdu_len",
+        "s2": "ctrl1",
+        "s3": "ctrl2",
+        "s6": "type_id",
+        "s7": "vsq",
+    },
+    "ETHERNET_IP": {
+        "b0": "command", "b1": "command",
+        "b2": "encap_len", "b3": "encap_len",
+        "b4": "session_handle", "b5": "session_handle", "b6": "session_handle", "b7": "session_handle",
+        "b8": "status", "b9": "status", "b10": "status", "b11": "status",
+        "b24": "interface_handle", "b25": "interface_handle", "b26": "interface_handle", "b27": "interface_handle",
+        "b28": "timeout", "b29": "timeout",
+        "b30": "item_count", "b31": "item_count",
+        "b40": "service",
+        "s0": "command",
+        "s2": "encap_len",
+        "s4": "session_handle",
+        "s8": "status",
     },
 }
 

@@ -3,22 +3,17 @@ P-EFSM 效果展示脚本
 ===================
 
 使用 Data/ 中的真实数据集训练 P-EFSM，并打印：
-  1. 现有 EFSM 评估指标（复用项目已有评估器）
+  1. 核心 EFSM 指标（precision / recall / f1）
   2. P-EFSM 结构统计指标
-  3. 概率转移分布，展示 probability / count / confidence 如何体现
+  3. 同一状态多条出边的计数与转移概率
 
 默认协议: MODBUS
 默认数据目录: Data/MODBUS
-
-运行示例:
-  python test/evaluation_test/eval_pefsm.py
-  python test/evaluation_test/eval_pefsm.py --protocol MODBUS --data-dir Data/MODBUS --max-pcaps 6
 """
 
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import sys
 import random
@@ -132,146 +127,90 @@ def _build_pefsm(
     return pefsm, train_trace
 
 
-def _probability_groups(pefsm: PEFSM):
+def _state_groups(pefsm: PEFSM):
     grouped = defaultdict(list)
     for tran in pefsm.transitions:
-        grouped[(tran.src, tran.symbol)].append(tran)
+        grouped[tran.src].append(tran)
     return grouped
 
 
-def _entropy(probs: List[float]) -> float:
-    vals = [p for p in probs if p > 0]
-    if not vals:
-        return 0.0
-    return -sum(p * math.log(p, 2) for p in vals)
-
-
 def _print_eval_metrics(result: FullEvalResult) -> None:
+    enhanced = result.enhanced_efsm or {}
+    legacy = result.legacy_efsm or {}
+    preferred = enhanced if {"guard_precision", "guard_recall", "guard_f1"}.issubset(enhanced.keys()) else legacy
+    source = "enhanced_efsm" if preferred is enhanced else "legacy_efsm"
+
     print(_SEP)
-    print("[1] EFSM 评估指标（复用现有评估器）")
+    print("[1] 端到端重放（主指标）")
     print(_SUB)
     print(f"protocol        : {result.protocol}")
-    print(f"train_sessions  : {result.train_sessions}")
-    print(f"test_sessions   : {result.test_sessions}")
-
-    print("\nLegacy EFSM Metrics:")
-    for k, v in sorted(result.legacy_efsm.items()):
-        print(f"  {k:<28} {_fmt(v)}")
-
-    print("\nEnhanced EFSM Metrics:")
-    if result.enhanced_efsm:
-        for k, v in sorted(result.enhanced_efsm.items()):
-            print(f"  {k:<28} {_fmt(v)}")
-    else:
-        print("  (该协议暂无 GT 指标)")
+    print(f"replay_eval_on  : {result.replay_on}")
+    rm = result.replay_metrics or {}
+    print(f"sess_replay_acc : {_fmt(rm.get('session_replay_accuracy', 0.0))}")
+    print(
+        f"sess_ok / total : {rm.get('sessions_full_replay_ok', 0)} / "
+        f"{rm.get('sessions_replay_evaluated', 0)}"
+    )
+    print(f"step_replay_acc : {_fmt(rm.get('step_replay_accuracy', 0.0))}")
+    print(f"steps matched   : {rm.get('steps_matched', 0)} / {rm.get('steps_total', 0)}")
+    print(_SUB)
+    print("[1b] Guard 字段级（GT 参考）")
+    print(_SUB)
+    print(f"metric_source   : {source}")
+    print(f"guard_precision : {_fmt(preferred.get('guard_precision', 0.0))}")
+    print(f"guard_recall    : {_fmt(preferred.get('guard_recall', 0.0))}")
+    print(f"guard_f1        : {_fmt(preferred.get('guard_f1', 0.0))}")
 
 
 def _print_pefsm_metrics(pefsm: PEFSM, train_trace: Trace) -> None:
-    grouped = _probability_groups(pefsm)
+    grouped = _state_groups(pefsm)
     confidence_counter = Counter((t.confidence or "unknown") for t in pefsm.transitions)
-    branch_groups = {k: v for k, v in grouped.items() if len(v) > 1}
-    entropies = [_entropy([t.prob or 0.0 for t in trans]) for trans in grouped.values()]
+    branching_states = {sid: trans for sid, trans in grouped.items() if len(trans) > 1}
 
     print("\n" + _SEP)
-    print("[2] P-EFSM 结构与概率指标")
+    print("[2] P-EFSM 结构指标")
     print(_SUB)
     print(f"states                         : {len(pefsm.states)}")
     print(f"transitions                    : {len(pefsm.transitions)}")
     print(f"abstract_messages(train)       : {len(train_trace.abstract_messages)}")
-    print(f"probabilistic_groups           : {len(grouped)}")
-    print(f"branching_groups(>1 edges)     : {len(branch_groups)}")
-    print(f"avg_group_entropy(bits)        : {sum(entropies) / len(entropies) if entropies else 0.0:.4f}")
+    print(f"branching_states(>1 edges)     : {len(branching_states)}")
     print(f"confidence_high                : {confidence_counter.get('high', 0)}")
     print(f"confidence_medium              : {confidence_counter.get('medium', 0)}")
     print(f"confidence_low                 : {confidence_counter.get('low', 0)}")
 
 
 def _print_probability_demo(pefsm: PEFSM, top_k: int = 12) -> None:
-    grouped = _probability_groups(pefsm)
-    by_src = defaultdict(list)
-    for tran in pefsm.transitions:
-        by_src[tran.src].append(tran)
+    grouped = _state_groups(pefsm)
 
     print("\n" + _SEP)
     print("[3] 概率转移如何体现")
     print(_SUB)
-    print("说明1: 模型内部保存的是条件概率 P(dst | src, symbol)。")
-    print("说明2: 如果当前 EFSM 已被确定性化，同一个 (src, symbol) 只有一条边，那么该条件概率会自然变成 1.0。")
-    print("说明3: 为了更直观看到概率层效果，下面额外打印按源状态 src 归一化后的出边频率分布。\n")
+    print("说明: 对同一源状态 src 的所有出边统计 count，再归一化得到 state-level transition probability。")
+    print("也就是: P(transition | src) = count(src -> edge) / sum_count(all outgoing edges from src)\n")
 
-    ranked_groups = sorted(
+    ranked_states = sorted(
         grouped.items(),
-        key=lambda item: (
-            -len(item[1]),
-            -sum(t.traverse_count for t in item[1]),
-            item[0][0],
-            item[0][1],
-        ),
-    )
-
-    shown = 0
-    print("[A] 条件概率 P(dst | src, symbol)")
-    for (src, symbol), transitions in ranked_groups:
-        transitions = sorted(
-            transitions,
-            key=lambda t: (-(t.prob or 0.0), -t.traverse_count, t.dst),
-        )
-        total = sum(t.traverse_count for t in transitions)
-        if total <= 0:
-            continue
-        shown += 1
-        print(f"  [Group {shown}] src=s{src}, symbol={symbol}, total_count={total}")
-        for tran in transitions:
-            prob = tran.prob or 0.0
-            print(
-                f"    s{tran.src} --[{tran.symbol}]--> s{tran.dst}"
-                f"   count={tran.traverse_count:<4d}"
-                f" prob={prob:.4f}"
-                f" confidence={tran.confidence}"
-            )
-        if shown >= top_k:
-            break
-
-    print("\n[B] 按源状态归一化的出边频率分布")
-    src_ranked = sorted(
-        by_src.items(),
         key=lambda item: (-sum(t.traverse_count for t in item[1]), item[0]),
     )
+
     shown = 0
-    for src, transitions in src_ranked:
+    for src, transitions in ranked_states:
         total = sum(t.traverse_count for t in transitions)
         if total <= 0 or len(transitions) <= 1:
             continue
         shown += 1
-        print(f"  [State {shown}] src=s{src}, outgoing_total={total}")
+        print(f"[State {shown}] src=s{src}, outgoing_total={total}")
         ordered = sorted(transitions, key=lambda t: (-t.traverse_count, t.symbol, t.dst))
         for tran in ordered:
-            state_prob = tran.traverse_count / total if total > 0 else 0.0
             print(
-                f"    s{tran.src} --[{tran.symbol}]--> s{tran.dst}"
+                f"  s{tran.src} --[{tran.symbol}]--> s{tran.dst}"
                 f"   count={tran.traverse_count:<4d}"
-                f" state_prob={state_prob:.4f}"
-                f" cond_prob={(tran.prob or 0.0):.4f}"
+                f" state_prob={(tran.prob or 0.0):.4f}"
                 f" confidence={tran.confidence}"
             )
         print()
         if shown >= top_k:
             break
-
-    top_transitions = sorted(
-        pefsm.transitions,
-        key=lambda t: (-t.traverse_count, -(t.prob or 0.0), t.src, t.symbol, t.dst),
-    )[:top_k]
-
-    print(_SUB)
-    print(f"Top-{top_k} transitions by traverse_count:")
-    for tran in top_transitions:
-        print(
-            f"  s{tran.src} --[{tran.symbol}]--> s{tran.dst}"
-            f"   count={tran.traverse_count}"
-            f" prob={(tran.prob or 0.0):.4f}"
-            f" confidence={tran.confidence}"
-        )
 
 
 def run_demo(

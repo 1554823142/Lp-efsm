@@ -65,7 +65,13 @@ def _print_section(title: str, metrics: dict) -> None:
 def _print_result(r: FullEvalResult) -> None:
     print(_SEP)
     print(f"  协议  : {r.protocol}")
+    print(f"  总会话(截断后) : {r.total_sessions}")
     print(f"  训练会话 : {r.train_sessions}   测试会话 : {r.test_sessions}")
+    print(f"  端到端重放 split : {getattr(r, 'replay_on', 'n/a')}")
+    if getattr(r, "replay_metrics", None):
+        print("  会话级重放准确率 / 步级重放准确率 : "
+              f"{r.replay_metrics.get('session_replay_accuracy', 0):.4f} / "
+              f"{r.replay_metrics.get('step_replay_accuracy', 0):.4f}")
     print(_SUB)
 
     print("\n  [Legacy EFSM 指标]  (基于序列回放，不依赖协议规范)")

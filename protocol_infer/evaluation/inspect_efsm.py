@@ -199,7 +199,7 @@ def extract_guard_desc(guard_fn) -> Dict[str, Any]:
 
     # 检查是否是 Apriori guard 闭包（应含 single_constraints）
     if "single_constraints" not in nonlocals:
-        return {"_type": "opaque", "_raw": nonlocals}
+        return {"_type": "opaque"}
 
     return {
         "_type": "apriori",
@@ -240,7 +240,7 @@ def extract_action_desc(action_fn) -> Dict[str, Any]:
 
     if not nonlocals:
         return {"_type": "opaque"}
-    return {"_type": "opaque", "_raw": nonlocals}
+    return {"_type": "opaque"}
 
 
 # ---------------------------------------------------------------------------
@@ -291,20 +291,23 @@ def _fmt_guard_desc(guard_desc: Dict, protocol: str, indent: str = "    ") -> Li
         lines.append(f"{indent}(guard 不可解析)")
         return lines
 
-    # 单变量约束
+    # 单变量约束（按变量名排序；过多时截断展示）
     single = guard_desc.get("single_constraints", {})
+    max_single_show = 16
     if single:
-        lines.append(f"{indent}[单变量约束]")
-        for name, cst in sorted(single.items()):
+        items = sorted(single.items())
+        lines.append(f"{indent}[单变量约束]{' (其余已省略)' if len(items) > max_single_show else ''}")
+        for name, cst in items[:max_single_show]:
             lines.append(f"{indent}  {_fmt_constraint(name, cst, protocol)}")
     else:
         lines.append(f"{indent}[单变量约束] (无)")
 
-    # 关联规则
+    # 关联规则（按置信度已排序；展示截断减轻冗余）
     joint = guard_desc.get("joint_rules", [])
+    max_joint_show = 8
     if joint:
-        lines.append(f"{indent}[关联规则]")
-        for ante_vars, ante_vals, cons_vars, cons_vals, conf in joint:
+        lines.append(f"{indent}[关联规则]{' (其余已省略)' if len(joint) > max_joint_show else ''}")
+        for ante_vars, ante_vals, cons_vars, cons_vals, conf in joint[:max_joint_show]:
             ante_parts = []
             for n, v in zip(ante_vars, ante_vals):
                 sem = _alias(n, protocol)
@@ -318,11 +321,13 @@ def _fmt_guard_desc(guard_desc: Dict, protocol: str, indent: str = "    ") -> Li
             rule_str = " & ".join(ante_parts) + " -> " + " & ".join(cons_parts)
             lines.append(f"{indent}  {rule_str}  (conf={conf:.2f})")
 
+    max_linear_show = 6
+    max_triplet_show = 6
     # 线性关系
     linear = guard_desc.get("linear_pairs", [])
     if linear:
-        lines.append(f"{indent}[线性关系]")
-        for a, b, k, c, r2 in linear:
+        lines.append(f"{indent}[线性关系]{' (其余已省略)' if len(linear) > max_linear_show else ''}")
+        for a, b, k, c, r2 in linear[:max_linear_show]:
             sa, sb = _alias(a, protocol), _alias(b, protocol)
             la = a if sa == a else f"{a}({sa})"
             lb = b if sb == b else f"{b}({sb})"
@@ -334,8 +339,8 @@ def _fmt_guard_desc(guard_desc: Dict, protocol: str, indent: str = "    ") -> Li
     # 三元和
     triplets = guard_desc.get("triplet_sums", [])
     if triplets:
-        lines.append(f"{indent}[三元和关系]")
-        for a, b, c_var, res in triplets:
+        lines.append(f"{indent}[三元和关系]{' (其余已省略)' if len(triplets) > max_triplet_show else ''}")
+        for a, b, c_var, res in triplets[:max_triplet_show]:
             sa, sb, sc = _alias(a, protocol), _alias(b, protocol), _alias(c_var, protocol)
             la = a if sa == a else f"{a}({sa})"
             lb = b if sb == b else f"{b}({sb})"
@@ -364,9 +369,10 @@ def _fmt_action_desc(action_desc: Dict, protocol: str, indent: str = "    ") -> 
     delta_vars = {n: p for n, (t, p) in rules.items() if t == "delta"}
     keep_vars  = [n for n, (t, _) in rules.items() if t == "keep"]
 
+    max_delta_show = 12
     if delta_vars:
-        lines.append(f"{indent}[变化字段]")
-        for name, delta in sorted(delta_vars.items()):
+        lines.append(f"{indent}[变化字段]{' (其余已省略)' if len(delta_vars) > max_delta_show else ''}")
+        for name, delta in sorted(delta_vars.items())[:max_delta_show]:
             sem = _alias(name, protocol)
             label = name if sem == name else f"{name}({sem})"
             lines.append(f"{indent}  {label} += {delta!r}")
@@ -376,7 +382,12 @@ def _fmt_action_desc(action_desc: Dict, protocol: str, indent: str = "    ") -> 
         for n in sorted(keep_vars):
             sem = _alias(n, protocol)
             keep_labels.append(n if sem == n else f"{n}({sem})")
-        lines.append(f"{indent}[不变字段] {', '.join(keep_labels)}")
+        max_keep_show = 14
+        if len(keep_labels) > max_keep_show:
+            shown = ", ".join(keep_labels[:max_keep_show])
+            lines.append(f"{indent}[不变字段] {shown}, …（共{len(keep_labels)}项）")
+        else:
+            lines.append(f"{indent}[不变字段] {', '.join(keep_labels)}")
 
     if not delta_vars and not keep_vars:
         lines.append(f"{indent}(action_rules 为空 — 直接返回原 vars)")

@@ -121,6 +121,43 @@ class DataFlowPipeline:
         '''
         return self.feature_processor.prepare_sessions(trace, sessions)
 
+    def materialize_abstract_messages(
+        self,
+        trace: Trace,
+        sessions: Optional[Dict[SessionKey, List[MessageEvent]]] = None,
+        precomputed_sess_features: Optional[Dict[SessionKey, tuple]] = None,
+        apriori_positions: Optional[List[int]] = None,
+        skip_dynamic_detection: bool = False,
+    ) -> None:
+        """
+        仅填充 trace.abstract_messages（与 run 的抽象阶段一致），不推断 EFSM。
+        在已训练好的 feature_processor / abstractor 上对新 Trace（如测试集）生成符号与变量，
+        供 PEFSM 重放评估；skip_dynamic_detection=True 时不再改动态字段，避免与训练不一致。
+        """
+        if self.abstraction_processor.abstractor is None or (
+            self.symbol_featureer is None and precomputed_sess_features is None
+        ):
+            raise RuntimeError(
+                "materialize_abstract_messages 需要 abstractor，以及 symbol_featureer 或 precomputed_sess_features"
+            )
+
+        sessions = self._prepare_sessions(trace, sessions)
+        self.feature_processor.build_session_contexts(trace, sessions)
+        ev_sym_pairs = self._collect_ev_sym_pairs(sessions, precomputed_sess_features)
+        if not skip_dynamic_detection:
+            self._detect_and_update_dynamic_fields(ev_sym_pairs, apriori_positions)
+
+        trace.abstract_messages = [
+            AbstractMessage(
+                session_key=ev.session_key,
+                timestamp=ev.timestamp,
+                symbol=sym,
+                vars=self.feature_processor.extract_vars(ev),
+                direction=ev.direction,
+            )
+            for ev, sym in ev_sym_pairs
+        ]
+
     def run(
         self,
         trace: Trace,

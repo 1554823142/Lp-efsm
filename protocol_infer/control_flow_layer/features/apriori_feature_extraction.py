@@ -1,8 +1,13 @@
-from typing import List, Tuple, FrozenSet, Any, Optional, Dict, Set
-from protocol_infer.core.interface.feature_extractor import FeatureExtractor
-from protocol_infer.core.datamodel.event import MessageEvent
-from protocol_infer.apriori.miners import StaticFieldMiner, BytePositionTransactionBuilder, StaticFieldInterpreter
+import random
+from collections import defaultdict
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
+
 from protocol_infer.apriori.core import AprioriCore
+from protocol_infer.apriori.miners import BytePositionTransactionBuilder, StaticFieldInterpreter, StaticFieldMiner
+from protocol_infer.control_flow_layer.features.protocol_semantics import extract_protocol_semantic_features
+from protocol_infer.core.datamodel.event import MessageEvent
+from protocol_infer.core.interface.feature_extractor import FeatureExtractor
+
 
 class AprioriFeatureExtraction(FeatureExtractor):
     def __init__(
@@ -12,7 +17,7 @@ class AprioriFeatureExtraction(FeatureExtractor):
         field_groups: Optional[List[List[int]]] = None,
         static_items: Optional[Dict[int, int]] = None,
         max_payload_len: float = 1.0,
-        onehot_weight: float = 2.0
+        onehot_weight: float = 2.0,
     ):
         self.positions = positions
         self.itemsets = itemsets
@@ -20,12 +25,12 @@ class AprioriFeatureExtraction(FeatureExtractor):
         self.static_items = static_items or {}
         self.max_payload_len = max_payload_len
         self.onehot_weight = onehot_weight
-        self._miner: Optional[StaticFieldMiner] = None  # 由 from_events 填充
+        self._miner: Optional[StaticFieldMiner] = None
         self._byte_bins: Dict[int, Tuple[int, int]] = {}
 
-    @classmethod                    # 可能不需要预先创建类实例
+    @classmethod
     def from_events(
-        cls,                        # 类似self,接收类本身 
+        cls,
         events_all: List[MessageEvent],
         max_positions: int = 16,
         max_itemsets: int = 8,
@@ -39,49 +44,57 @@ class AprioriFeatureExtraction(FeatureExtractor):
         field_group_max_groups: int = 8,
         enable_range_confirmation: bool = True,
         range_ratio_threshold: float = 0.1,
+        max_mining_events: int = 2048,
+        mining_seed: int = 42,
+        scan_positions: int = 24,
     ) -> "AprioriFeatureExtraction":
-    
-        # 1. 用 BytePositionTransactionBuilder + Apriori 发现伪字段
+        mining_events = cls._sample_events(events_all, limit=max_mining_events, seed=mining_seed)
+        seed_positions = [p for p, _ in cls._select_informative_positions(mining_events, scan_positions)[:max_positions]]
+        if not seed_positions:
+            seed_positions = list(range(min(max_positions, scan_positions)))
+
         miner = StaticFieldMiner(
-            builder=BytePositionTransactionBuilder(max_positions=max_positions),
+            builder=BytePositionTransactionBuilder(max_positions=scan_positions, positions=seed_positions),
             interpreter=StaticFieldInterpreter(global_static_threshold=global_static_threshold),
-            min_support=min_support
+            min_support=min_support,
         )
-        maximal_sets = miner.mine(events_all)
+        mined_itemsets = cls._mine_multiview_itemsets(
+            miner=miner,
+            events_all=mining_events,
+            min_subset_size=max(24, min(128, len(mining_events) // 10 if mining_events else 24)),
+        )
+        static_items = cls._extract_static_items(miner.get_global_static_items())
+        static_positions = set(static_items.keys())
 
-        # 2. 从结果中提取有价值的偏移位置 (伪字段)
-
-        # 出现次数多的偏移, 说明它在多个不同的消息类型模式里都起作用, 区分价值更高，应该优先保留
-        pos_count = {}
-        for fs, _ in maximal_sets:
-            for (pos, _val) in fs:
-                pos_count[pos] = pos_count.get(pos, 0) + 1
-
-        # 按出现次数降序，截断后再按偏移大小排序（保持特征维度顺序稳定）
-        positions = sorted(
-            sorted(pos_count, key=lambda p: -pos_count[p])[:max_positions]
+        positions = cls._rank_positions(
+            events_all=mining_events,
+            mined_itemsets=mined_itemsets,
+            max_positions=max_positions,
+            scan_positions=scan_positions,
+            seed_positions=seed_positions,
+            excluded_positions=static_positions,
         )
 
-        # 按支持度降序排序后截断，保留最有代表性的项集
-        top_itemsets = sorted(maximal_sets, key=lambda x: -x[1])[:max_itemsets]
-        itemsets = [fs for fs, _ in top_itemsets]   # 只保留项集，丢弃支持度
-
-        # 计算最大负载长度，用于归一化
+        top_itemsets = sorted(
+            mined_itemsets,
+            key=lambda x: (-x[1], -len(x[0]), tuple(sorted(x[0]))),
+        )[:max_itemsets]
+        itemsets = [fs for fs, _ in top_itemsets]
         max_payload_len = max((len(e.payload or b"") for e in events_all), default=1)
 
         field_groups: List[List[int]] = []
         byte_bins: Dict[int, Tuple[int, int]] = {}
-        static_items: Dict[int, int] = {}
         if enable_field_groups:
             field_groups, byte_bins = cls._discover_field_groups(
-                events_all=events_all,
-                max_positions=max_positions,
+                events_all=mining_events,
+                max_positions=scan_positions,
                 min_support=field_group_min_support,
                 min_confidence=field_group_min_confidence,
                 n_bins=field_group_bins,
                 max_groups=field_group_max_groups,
                 enable_range_confirmation=enable_range_confirmation,
                 range_ratio_threshold=range_ratio_threshold,
+                candidate_positions=positions,
             )
 
         instance = cls(
@@ -94,41 +107,164 @@ class AprioriFeatureExtraction(FeatureExtractor):
         )
         instance._miner = miner
         instance._byte_bins = byte_bins
-        instance.static_items = cls._extract_static_items(miner.get_global_static_items())
+        instance.static_items = static_items
         return instance
 
+    @staticmethod
+    def _sample_events(events_all: List[MessageEvent], limit: int, seed: int) -> List[MessageEvent]:
+        if limit <= 0 or len(events_all) <= limit:
+            return list(events_all)
+        rng = random.Random(seed)
+        sample_idx = sorted(rng.sample(range(len(events_all)), limit))
+        return [events_all[i] for i in sample_idx]
+
+    @classmethod
+    def _mine_multiview_itemsets(
+        cls,
+        miner: StaticFieldMiner,
+        events_all: List[MessageEvent],
+        min_subset_size: int,
+    ) -> List[Tuple[FrozenSet[Tuple[int, int]], float]]:
+        merged: Dict[FrozenSet[Tuple[int, int]], float] = {}
+        total = max(len(events_all), 1)
+
+        def absorb(events_subset: List[MessageEvent]) -> None:
+            if not events_subset:
+                return
+            for fs, support in miner.mine(events_subset):
+                weighted = support * (len(events_subset) / total)
+                prev = merged.get(fs, 0.0)
+                if weighted > prev:
+                    merged[fs] = weighted
+
+        absorb(events_all)
+
+        by_dir: Dict[object, List[MessageEvent]] = defaultdict(list)
+        for ev in events_all:
+            by_dir[ev.direction].append(ev)
+        for subset in by_dir.values():
+            if len(subset) >= min_subset_size:
+                absorb(subset)
+
+        return [(fs, sup) for fs, sup in merged.items()]
+
+    @classmethod
+    def _rank_positions(
+        cls,
+        events_all: List[MessageEvent],
+        mined_itemsets: List[Tuple[FrozenSet[Tuple[int, int]], float]],
+        max_positions: int,
+        scan_positions: int,
+        seed_positions: Optional[List[int]] = None,
+        excluded_positions: Optional[set[int]] = None,
+    ) -> List[int]:
+        excluded_positions = excluded_positions or set()
+        scores: Dict[int, float] = defaultdict(float)
+        for fs, support in mined_itemsets:
+            weight = support * max(len(fs), 1)
+            for pos, _val in fs:
+                if pos not in excluded_positions:
+                    scores[pos] += weight
+
+        if seed_positions:
+            for pos in seed_positions:
+                if pos not in excluded_positions:
+                    scores[pos] += 0.05
+
+        for pos, score in cls._select_informative_positions(events_all, scan_positions):
+            if pos not in excluded_positions:
+                scores[pos] += score
+
+        if not scores:
+            fallback = [p for p in range(min(max_positions, scan_positions)) if p not in excluded_positions]
+            return fallback[:max_positions]
+
+        ranked = sorted(scores, key=lambda p: (-scores[p], p))[:max_positions]
+        return sorted(ranked)
+
+    @staticmethod
+    def _select_informative_positions(
+        events_all: List[MessageEvent],
+        scan_positions: int,
+    ) -> List[Tuple[int, float]]:
+        ranked: List[Tuple[int, float]] = []
+        total = max(len(events_all), 1)
+        for pos in range(scan_positions):
+            counts: Dict[int, int] = defaultdict(int)
+            present = 0
+            for ev in events_all:
+                payload = ev.payload or b""
+                if pos >= len(payload):
+                    continue
+                present += 1
+                counts[int(payload[pos])] += 1
+            if present < max(8, int(total * 0.2)):
+                continue
+            unique = len(counts)
+            if unique <= 1:
+                continue
+            unique_ratio = unique / present
+            if unique_ratio > 0.35:
+                continue
+            max_prob = max(counts.values()) / present
+            coverage = present / total
+            score = coverage * (1.0 - max_prob) * (1.0 - unique_ratio)
+            if score > 0:
+                ranked.append((pos, score))
+        ranked.sort(key=lambda item: (-item[1], item[0]))
+        return ranked
+
     def extract(self, trace: List[MessageEvent]) -> List[List[float]]:
-        # 3. 构造特征向量
         features: List[List[float]] = []
         for event in trace:
-            payload = event.payload or b""
-
-            # 3.1. 静态偏移字节值 (归一化到 [0,1])
-            pos_vals = [
-                float(payload[pos]) / 255.0 if pos < len(payload) else 0.0
-                for pos in self.positions
-            ]
- 
-            # 3.2. 项集匹配 one-hot (加权)
-            onehot = []
-            for fs in self.itemsets:
-                matched = all(p < len(payload) and payload[p] == v for (p, v) in fs)
-                onehot.append(self.onehot_weight if matched else 0.0)
-
-            # 3.3. 归一化长度
-            length_val = len(payload) / max(self.max_payload_len, 1.0)      # 防止除以0
-
-            # 3.4. 方向特征
-            direction_val = float(event.direction.to_feature())
-
-            group_vals = [
-                self._field_group_feature(payload, group)
-                for group in self.field_groups
-            ]
-
-            vec = pos_vals + onehot + group_vals + [length_val, direction_val]
+            # 内部复用 extract_vars 的逻辑并转换为 flat list，保持与聚类层兼容
+            vars_dict = self.extract_vars(event)
+            # 注意：此处必须保证顺序一致，与之前 extract() 的 vec 结构对应
+            # 但聚类层其实不关心 key，只要同一批次的顺序一致即可
+            vec = list(vars_dict.values())
             features.append(vec)
         return features
+
+    def extract_vars(self, event: MessageEvent) -> Dict[str, float]:
+        """
+        提取具名变量。
+        b{offset} -> 原始字节位
+        onehot_{idx} -> 项集匹配
+        group_{idx} -> 字段组
+        pkt_len, direction -> 基础特征
+        b0..b7 -> 头部语义
+        sem_{idx} -> 协议特定语义
+        """
+        payload = event.payload or b""
+        vars_dict = {}
+
+        # 1. 核心字节位置 (b{offset})
+        for pos in self.positions:
+            vars_dict[f"b{pos}"] = float(payload[pos]) / 255.0 if pos < len(payload) else 0.0
+
+        # 2. 项集 One-hot
+        for i, fs in enumerate(self.itemsets):
+            matched = all(p < len(payload) and payload[p] == v for p, v in fs)
+            vars_dict[f"onehot_{i}"] = self.onehot_weight if matched else 0.0
+
+        # 3. 字段组
+        for i, group in enumerate(self.field_groups):
+            vars_dict[f"group_{i}"] = self._field_group_feature(payload, group)
+
+        # 4. 基础特征
+        vars_dict["pkt_len"] = len(payload) / max(self.max_payload_len, 1.0)
+        vars_dict["direction"] = float(event.direction.to_feature())
+
+        # 5. 协议语义
+        semantic = extract_protocol_semantic_features(event)
+        # semantic 前 8 个强制映射为 b0..b7，确保能被 eval 对齐
+        for i in range(min(8, len(semantic))):
+            vars_dict[f"b{i}"] = semantic[i]
+
+        for i in range(8, len(semantic)):
+            vars_dict[f"sem_{i-8}"] = semantic[i]
+
+        return vars_dict
 
     @staticmethod
     def _extract_static_items(items: FrozenSet[Any]) -> Dict[int, int]:
@@ -174,6 +310,7 @@ class AprioriFeatureExtraction(FeatureExtractor):
         max_groups: int,
         enable_range_confirmation: bool,
         range_ratio_threshold: float,
+        candidate_positions: Optional[List[int]] = None,
     ) -> Tuple[List[List[int]], Dict[int, Tuple[int, int]]]:
         values_by_pos: Dict[int, List[int]] = {i: [] for i in range(max_positions)}
         for ev in events_all:
@@ -200,7 +337,10 @@ class AprioriFeatureExtraction(FeatureExtractor):
             byte_bins[pos] = (t1, t2)
             ranges[pos] = max(vals) - min(vals)
 
-        candidate_positions = [p for p in range(max_positions) if values_by_pos[p] and ranges.get(p, 0) > 0]
+        if candidate_positions is None:
+            candidate_positions = [p for p in range(max_positions) if values_by_pos[p] and ranges.get(p, 0) > 0]
+        else:
+            candidate_positions = [p for p in candidate_positions if values_by_pos.get(p) and ranges.get(p, 0) > 0]
         candidate_set = set(candidate_positions)
         if not candidate_positions:
             return [], byte_bins
@@ -208,11 +348,10 @@ class AprioriFeatureExtraction(FeatureExtractor):
         transactions: List[FrozenSet[Any]] = []
         for ev in events_all:
             payload = ev.payload or b""
-            limit = min(len(payload), max_positions)
             items = []
             for i in candidate_positions:
-                if i >= limit:
-                    break
+                if i >= len(payload):
+                    continue
                 t1, t2 = byte_bins[i]
                 b = cls._discretize(int(payload[i]), t1, t2)
                 items.append((i, b))
