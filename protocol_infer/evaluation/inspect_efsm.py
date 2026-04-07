@@ -307,7 +307,64 @@ def _fmt_guard_desc(guard_desc: Dict, protocol: str, indent: str = "    ") -> Li
     max_joint_show = 8
     if joint:
         lines.append(f"{indent}[关联规则]{' (其余已省略)' if len(joint) > max_joint_show else ''}")
-        for ante_vars, ante_vals, cons_vars, cons_vals, conf in joint[:max_joint_show]:
+        # 折叠“互为蕴含”的循环规则：A->B 与 B->A（通常由样本分布导致的等价共现）
+        # 仅在 1->1 且 conf≈1 时折叠，避免错误合并一般规则。
+        folded = []
+        used = set()
+        for i, (a_vars, a_vals, c_vars, c_vals, conf) in enumerate(joint):
+            if i in used:
+                continue
+            if (
+                conf >= 0.999
+                and len(a_vars) == 1
+                and len(c_vars) == 1
+                and len(a_vals) == 1
+                and len(c_vals) == 1
+            ):
+                a = (a_vars[0], a_vals[0])
+                b = (c_vars[0], c_vals[0])
+                j_idx = None
+                for j in range(i + 1, len(joint)):
+                    if j in used:
+                        continue
+                    aa, av, cc, cv, cconf = joint[j]
+                    if (
+                        cconf >= 0.999
+                        and len(aa) == 1
+                        and len(cc) == 1
+                        and len(av) == 1
+                        and len(cv) == 1
+                        and (aa[0], av[0]) == b
+                        and (cc[0], cv[0]) == a
+                    ):
+                        j_idx = j
+                        break
+                if j_idx is not None:
+                    used.add(i)
+                    used.add(j_idx)
+                    folded.append(("equiv", a, b, conf))
+                    continue
+            used.add(i)
+            folded.append(("rule", (a_vars, a_vals, c_vars, c_vals, conf)))
+
+        shown = 0
+        for item in folded:
+            if shown >= max_joint_show:
+                break
+            if item[0] == "equiv":
+                _tag, a, b, conf = item
+                (a_name, a_val), (b_name, b_val) = a, b
+                a_sem = _alias(a_name, protocol)
+                b_sem = _alias(b_name, protocol)
+                a_label = a_name if a_sem == a_name else f"{a_name}({a_sem})"
+                b_label = b_name if b_sem == b_name else f"{b_name}({b_sem})"
+                lines.append(
+                    f"{indent}  {a_label}≈{a_val!r} & {b_label}≈{b_val!r}  (conf={conf:.2f}, 共现/等价)"
+                )
+                shown += 1
+                continue
+
+            _tag, (ante_vars, ante_vals, cons_vars, cons_vals, conf) = item
             ante_parts = []
             for n, v in zip(ante_vars, ante_vals):
                 sem = _alias(n, protocol)
@@ -320,6 +377,7 @@ def _fmt_guard_desc(guard_desc: Dict, protocol: str, indent: str = "    ") -> Li
                 cons_parts.append(f"{tag}≈{v!r}")
             rule_str = " & ".join(ante_parts) + " -> " + " & ".join(cons_parts)
             lines.append(f"{indent}  {rule_str}  (conf={conf:.2f})")
+            shown += 1
 
     max_linear_show = 6
     max_triplet_show = 6

@@ -600,6 +600,26 @@ class AprioriGuardLearner(GuardActionLearner):
                 result.append((ante_vars, ante_vals, cons_vars, cons_vals, conf))
 
         result.sort(key=lambda x: -x[4])                        # 置信度降序排列
+        # 剪枝互为蕴含的循环规则：A->B 与 B->A（常由样本共现导致）
+        # 仅处理 1->1 且 conf≈1 的情况，避免误删一般规则。
+        pruned: List[Tuple[List[str], List[float], List[str], List[float], float]] = []
+        seen_pairs = set()
+        for ante_vars, ante_vals, cons_vars, cons_vals, conf in result:
+            if (
+                conf >= 0.999
+                and len(ante_vars) == 1
+                and len(cons_vars) == 1
+                and len(ante_vals) == 1
+                and len(cons_vals) == 1
+            ):
+                a = (ante_vars[0], ante_vals[0])
+                b = (cons_vars[0], cons_vals[0])
+                key = tuple(sorted([a, b], key=lambda x: (x[0], x[1])))
+                if key in seen_pairs:
+                    continue
+                seen_pairs.add(key)
+            pruned.append((ante_vars, ante_vals, cons_vars, cons_vals, conf))
+        result = pruned
         return result, cached_means
 
     def _learn_action(
