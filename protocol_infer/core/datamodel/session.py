@@ -9,6 +9,7 @@ class SessionKey:
     ip2: str
     port2: int
     protocol: str
+    segment_id: int = 0
 
 
 @dataclass

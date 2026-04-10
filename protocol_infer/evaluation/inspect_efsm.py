@@ -263,19 +263,72 @@ def _fmt_constraint(var_name: str, constraint: tuple, protocol: str) -> str:
     """将单变量约束格式化为可读字符串。"""
     sem = _alias(var_name, protocol)
     label = f"{var_name}" if sem == var_name else f"{var_name}({sem})"
+    is_byte_like = var_name.startswith(("b", "s", "dyn_"))
+
+    def _dyn_width(vn: str) -> Optional[int]:
+        if not vn.startswith("dyn_"):
+            return None
+        parts = vn.split("_")
+        if len(parts) >= 3:
+            w = parts[2]
+            if w and w[0].isdigit():
+                digits = ""
+                for ch in w:
+                    if ch.isdigit():
+                        digits += ch
+                    else:
+                        break
+                try:
+                    return int(digits)
+                except ValueError:
+                    return None
+        if len(parts) == 2:
+            return 1
+        return None
+
+    def _to_int(x: Any) -> int:
+        try:
+            return int(x)
+        except Exception:
+            try:
+                return int(round(float(x)))
+            except Exception:
+                return 0
+
+    def _hex(x: Any, width: Optional[int]) -> str:
+        n = _to_int(x)
+        if width is None:
+            return hex(n)
+        digits = max(2, int(width) * 2)
+        return "0x" + format(n & ((1 << (digits * 4)) - 1), f"0{digits}x")
+
+    width = _dyn_width(var_name)
+    if width is None and var_name.startswith(("b", "s")):
+        width = 1
+
     ctype = constraint[0]
     if ctype == "eq":
         val = constraint[1]
+        if is_byte_like:
+            return f"{label} == {_hex(val, width)}"
         return f"{label} == {val!r}"
     if ctype == "in":
         vals = sorted(constraint[1])
-        vals_str = "{" + ", ".join(f"{v!r}" for v in vals) + "}"
+        if is_byte_like:
+            vals_str = "{" + ", ".join(_hex(v, width) for v in vals) + "}"
+        else:
+            vals_str = "{" + ", ".join(f"{v!r}" for v in vals) + "}"
         return f"{label} in {vals_str}"
     if ctype == "range":
         lo, hi = constraint[1]
+        if is_byte_like:
+            return f"{_hex(lo, width)} <= {label} <= {_hex(hi, width)}"
         return f"{lo!r} <= {label} <= {hi!r}"
     if ctype == "delta":
-        return f"{label} += {constraint[1]!r}  [序列]"
+        delta = constraint[1]
+        if is_byte_like:
+            return f"{label} += {_hex(delta, width)}  [序列]"
+        return f"{label} += {delta!r}  [序列]"
     return f"{label} ~ {constraint!r}"
 
 
@@ -358,8 +411,18 @@ def _fmt_guard_desc(guard_desc: Dict, protocol: str, indent: str = "    ") -> Li
                 b_sem = _alias(b_name, protocol)
                 a_label = a_name if a_sem == a_name else f"{a_name}({a_sem})"
                 b_label = b_name if b_sem == b_name else f"{b_name}({b_sem})"
+                def _fmt_item(n: str, v: Any) -> str:
+                    if n.startswith(("b", "s", "dyn_")):
+                        try:
+                            return hex(int(v))
+                        except Exception:
+                            try:
+                                return hex(int(round(float(v))))
+                            except Exception:
+                                return repr(v)
+                    return repr(v)
                 lines.append(
-                    f"{indent}  {a_label}≈{a_val!r} & {b_label}≈{b_val!r}  (conf={conf:.2f}, 共现/等价)"
+                    f"{indent}  {a_label}≈{_fmt_item(a_name, a_val)} & {b_label}≈{_fmt_item(b_name, b_val)}  (conf={conf:.2f}, 共现/等价)"
                 )
                 shown += 1
                 continue
@@ -369,12 +432,24 @@ def _fmt_guard_desc(guard_desc: Dict, protocol: str, indent: str = "    ") -> Li
             for n, v in zip(ante_vars, ante_vals):
                 sem = _alias(n, protocol)
                 tag = n if sem == n else f"{n}({sem})"
-                ante_parts.append(f"{tag}≈{v!r}")
+                if n.startswith(("b", "s", "dyn_")):
+                    try:
+                        ante_parts.append(f"{tag}≈{hex(int(v))}")
+                    except Exception:
+                        ante_parts.append(f"{tag}≈{v!r}")
+                else:
+                    ante_parts.append(f"{tag}≈{v!r}")
             cons_parts = []
             for n, v in zip(cons_vars, cons_vals):
                 sem = _alias(n, protocol)
                 tag = n if sem == n else f"{n}({sem})"
-                cons_parts.append(f"{tag}≈{v!r}")
+                if n.startswith(("b", "s", "dyn_")):
+                    try:
+                        cons_parts.append(f"{tag}≈{hex(int(v))}")
+                    except Exception:
+                        cons_parts.append(f"{tag}≈{v!r}")
+                else:
+                    cons_parts.append(f"{tag}≈{v!r}")
             rule_str = " & ".join(ante_parts) + " -> " + " & ".join(cons_parts)
             lines.append(f"{indent}  {rule_str}  (conf={conf:.2f})")
             shown += 1
@@ -390,8 +465,14 @@ def _fmt_guard_desc(guard_desc: Dict, protocol: str, indent: str = "    ") -> Li
             la = a if sa == a else f"{a}({sa})"
             lb = b if sb == b else f"{b}({sb})"
             sign = "+" if c >= 0 else "-"
+            k_str = f"{k:.4g}"
+            c_str = f"{abs(c):.4g}"
+            if a.startswith(("b", "s", "dyn_")) and abs(float(k) - round(float(k))) < 1e-9:
+                k_str = str(int(round(float(k))))
+            if a.startswith(("b", "s", "dyn_")) and abs(float(c) - round(float(c))) < 1e-6:
+                c_str = hex(int(round(abs(float(c)))))
             lines.append(
-                f"{indent}  {la} = {k:.4g}·{lb} {sign} {abs(c):.4g}  (R²={r2:.4f})"
+                f"{indent}  {la} = {k_str}·{lb} {sign} {c_str}  (R²={r2:.4f})"
             )
 
     # 三元和
@@ -462,6 +543,24 @@ def _fmt_cross_message_desc(cross_desc: Dict, protocol: str, indent: str = "    
         m = aliases.get(n, n)
         return f"{n}({m})" if isinstance(m, str) and m != n else n
 
+    def _is_byte_like(n: str) -> bool:
+        return n.startswith(("b", "s", "dyn_"))
+
+    def _fmt_num(n: str, x: Any, as_hex: bool = False) -> str:
+        try:
+            fx = float(x)
+        except Exception:
+            return repr(x)
+        if _is_byte_like(n):
+            ix = int(round(fx))
+            if as_hex:
+                sign = "-" if ix < 0 else ""
+                return sign + hex(abs(ix))
+            return str(ix)
+        if abs(fx - round(fx)) < 1e-9:
+            return str(int(round(fx)))
+        return f"{fx:.4g}"
+
     identity = cross_desc.get("identity_rules", [])
     seq      = cross_desc.get("seq_rules", [])
     linear   = cross_desc.get("linear_rules", [])
@@ -474,14 +573,16 @@ def _fmt_cross_message_desc(cross_desc: Dict, protocol: str, indent: str = "    
     if seq:
         lines.append(f"{indent}[序列递增]")
         for var, delta in seq:
-            lines.append(f"{indent}  {_sem(var)} += {delta!r}  (逐消息递增)")
+            lines.append(f"{indent}  {_sem(var)} += {_fmt_num(var, delta, as_hex=_is_byte_like(var))}  (逐消息递增)")
 
     if linear:
         lines.append(f"{indent}[线性关系] curr.dst = k * prev.src + c")
         for dst_var, src_var, k, c, r2 in linear:
-            sign = "+" if c >= 0 else "-"
+            sign = "+" if float(c) >= 0 else "-"
+            k_str = _fmt_num(dst_var, k, as_hex=False)
+            c_str = _fmt_num(dst_var, abs(float(c)), as_hex=_is_byte_like(dst_var))
             lines.append(
-                f"{indent}  curr.{_sem(dst_var)} = {k:.4g} * prev.{_sem(src_var)} {sign} {abs(c):.4g}"
+                f"{indent}  curr.{_sem(dst_var)} = {k_str} * prev.{_sem(src_var)} {sign} {c_str}"
                 f"  (R²={r2:.4f})"
             )
 

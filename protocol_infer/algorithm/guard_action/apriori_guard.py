@@ -210,10 +210,7 @@ class AprioriGuardLearner(GuardActionLearner):
     # 不加入 guard 约束的变量名前缀
     # s-前缀（如 s0, s2, s6）：Apriori 静态项，对所有消息均为同一常量值，
     #   无转移判别力（不能区分本转移与其他转移），加入 guard 只增加误判风险。
-    # dyn_前缀（如 dyn_1, dyn_0_2b）：DynamicFieldDetector 检测的结构化字段，
-    #   多为计数器/序列号（txn_id 等），其值在训练数据中的取值范围不代表协议约束，
-    #   不应作为 guard 条件（否则新会话的 txn_id 值域不同会导致误拒）。
-    _GUARD_SKIP_PREFIX: tuple = ("s", "dyn_")
+    _GUARD_SKIP_PREFIX: tuple = ("s",)
 
     def _learn_guard(
         self,
@@ -233,9 +230,16 @@ class AprioriGuardLearner(GuardActionLearner):
 
         candidate_constraints: List[Dict[str, Any]] = []
 
+        def _as_int_if_needed(var_name: str, x: float) -> float | int:
+            if var_name.startswith(("b", "s", "dyn_")):
+                return int(round(float(x)))
+            return x
+
         # 1.1 收集单变量约束
         for name in var_names:
             if name in self._GUARD_SKIP_VARS or name in blacklist:
+                continue
+            if any(name.startswith(pfx) for pfx in self._GUARD_SKIP_PREFIX):
                 continue
             
             values = [v[name] for v in var_instances if name in v]
@@ -245,7 +249,7 @@ class AprioriGuardLearner(GuardActionLearner):
             
             constraint = None
             if vtype == "constant":
-                val = values[0]
+                val = _as_int_if_needed(name, values[0])
                 # 即使是符号全局常量，我们也收集它，但在显著性评分中会给予极低分
                 # 这样如果该转移没有其它更好的 Guard，它依然可能入选，从而匹配 GT
                 if n_samples >= min_conf:
@@ -253,16 +257,20 @@ class AprioriGuardLearner(GuardActionLearner):
                         constraint = ("eq", val)
             elif vtype == "discrete":
                 if n_samples >= min_conf:
-                    constraint = ("in", frozenset(values))
+                    constraint = ("in", frozenset(_as_int_if_needed(name, v) for v in values))
             elif vtype == "sequential":
-                delta = values[1] - values[0] if len(values) > 1 else 0.0
+                delta = (values[1] - values[0]) if len(values) > 1 else 0.0
+                delta = _as_int_if_needed(name, delta)
                 constraint = ("delta", delta)
             elif vtype == "continuous":
                 if n_samples >= min_samples_range:
                     span = max(values) - min(values)
                     if not (name.startswith("b") and span > 0.92):
-                        tol = span * self.continuous_tolerance
-                        constraint = ("range", (min(values) - tol, max(values) + tol))
+                        if name.startswith(("b", "s", "dyn_")):
+                            constraint = ("range", (int(min(values)), int(max(values))))
+                        else:
+                            tol = span * self.continuous_tolerance
+                            constraint = ("range", (min(values) - tol, max(values) + tol))
 
             if constraint:
                 score = self._calculate_significance(name, constraint, n_samples, context)
@@ -287,7 +295,7 @@ class AprioriGuardLearner(GuardActionLearner):
             })
 
         # 1.3 收集线性关系
-        continuous_vars = [n for n in var_names if var_types[n] == "continuous"]
+        continuous_vars = [n for n in var_names if var_types.get(n) == "continuous"]
         linear_pairs = []
         triplet_sums = []
         if len(continuous_vars) >= 2:

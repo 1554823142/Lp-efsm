@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>P-EFSM Visualizer</title>
-  <link rel="stylesheet" href="/static/styles.css?v=4" />
+  <link rel="stylesheet" href="/static/styles.css?v=7" />
   <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
   <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
   <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
@@ -52,6 +52,16 @@
           </select>
         </div>
 
+        <label>训练后剪枝</label>
+        <select id="pruneModeSelect" aria-label="训练后剪枝">
+          <option value="none" selected>不剪枝（保留完整结构）</option>
+          <option value="count">按次数 count 剪枝（保留主干）</option>
+          <option value="prob">按概率 prob 剪枝（保留主干）</option>
+        </select>
+
+        <label id="prunePercentileLabel">剪枝阈值（百分位）：70</label>
+        <input id="prunePercentileInput" type="range" min="50" max="99" value="70" />
+
         <div class="grid two">
           <div>
             <label>test_ratio</label>
@@ -62,6 +72,16 @@
             <input id="seedInput" type="number" value="42" />
           </div>
         </div>
+
+        <label>展示级别</label>
+        <select id="viewLevelSelect" aria-label="展示级别">
+          <option value="full" selected>级别1：完整状态机</option>
+          <option value="freq">级别2：仅高频转移边</option>
+          <option value="backbone">级别3：高频主干（start→end 路径）</option>
+        </select>
+
+        <label id="edgePercentileLabel">边频率阈值（百分位）：70</label>
+        <input id="edgePercentileInput" type="range" min="50" max="99" value="70" />
 
         <button id="learnBtn" class="primary">学习并展示 P-EFSM</button>
         <div id="statusBox" class="status">等待学习</div>
@@ -142,6 +162,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=4"></script>
+  <script src="/static/app.js?v=7"></script>
 </body>
 </html>

@@ -12,7 +12,12 @@ from protocol_infer.pcap_layer.pipeline import PCAPPipeline
 from protocol_infer.control_flow_layer.pipeline import ControlFlowPipeline
 from protocol_infer.data_flow_layer.pipeline import DataFlowPipeline
 from protocol_infer.probabilistic_layer.pipeline import ProbabilisticPipeline
-from protocol_infer.evaluation.run_evaluation import run_full_evaluation, _LABELERS
+from protocol_infer.evaluation.run_evaluation import (
+    run_full_evaluation,
+    run_full_evaluation_from_sessions,
+    generate_synthetic_sessions,
+    _LABELERS,
+)
 from protocol_infer.evaluation.supervised_eval import _group_sessions, _split_long_sessions, _split_keys, _looks_like_capture, filter_events_for_protocol
 from protocol_infer.visualization.replay import ReplayBuilder
 from protocol_infer.visualization.serializer import PEFSMSerializer
@@ -98,7 +103,34 @@ class VisualizationService:
             if os.path.isdir(full):
                 proto = self._infer_protocol_from_folder_name(name)
                 if proto in self._ALLOWED_PROTOCOLS:
-                    results.append({"name": name, "path": full})
+                    results.append(
+                        {
+                            "name": name,
+                            "path": full,
+                            "protocol": proto,
+                            "mode": "pcap",
+                            "label": f"{name} (PCAP)",
+                        }
+                    )
+                    results.append(
+                        {
+                            "name": name,
+                            "path": full,
+                            "protocol": proto,
+                            "mode": "pcap+synthetic",
+                            "label": f"{name} (PCAP+Synthetic)",
+                        }
+                    )
+        for proto in sorted(self._ALLOWED_PROTOCOLS):
+            results.append(
+                {
+                    "name": proto,
+                    "path": "__synthetic__",
+                    "protocol": proto,
+                    "mode": "synthetic",
+                    "label": f"{proto} (Synthetic)",
+                }
+            )
         return results
 
     def learn_from_dataset(
@@ -110,6 +142,11 @@ class VisualizationService:
         profile: str = "balanced",
         test_ratio: float = 0.2,
         seed: int = 42,
+        dataset_mode: str = "pcap",
+        synthetic_sessions: int = 0,
+        synthetic_session_len: int = 20,
+        prune_mode: str = "none",
+        prune_percentile: int = 70,
     ) -> Dict:
         max_pcaps, max_sessions, max_events_per_session, profile = self._resolve_training_limits(
             profile=profile,
@@ -117,35 +154,86 @@ class VisualizationService:
             max_sessions=max_sessions,
         )
 
-        # 确保 data_dir 是绝对路径
-        if not os.path.isabs(data_dir):
-            data_dir = os.path.join(self.data_root, data_dir)
+        mode = (dataset_mode or "pcap").strip().lower()
+        if mode not in {"pcap", "pcap+synthetic", "synthetic"}:
+            mode = "pcap"
 
-        pcap_paths = self._collect_pcaps(data_dir, max_pcaps)
-        if not pcap_paths:
-            raise RuntimeError(f"No valid PCAP files found in '{data_dir}'")
+        pcap_paths: List[str] = []
+        base_data_dir = data_dir
 
-        full_trace = self._load_trace(protocol, pcap_paths)
+        if mode == "synthetic":
+            desired = min(120, max_sessions)
+            n_synth = int(synthetic_sessions) if int(synthetic_sessions) > 0 else desired
+            sessions_all = generate_synthetic_sessions(
+                protocol=protocol,
+                n_sessions=n_synth,
+                session_len=int(synthetic_session_len),
+                seed=seed,
+            )
+            events: List[MessageEvent] = []
+            for evs in sessions_all.values():
+                events.extend(evs)
+            events.sort(key=lambda e: e.timestamp)
+            full_trace = Trace(events=events)
+            base_data_dir = "__synthetic__"
+        else:
+            # 确保 data_dir 是绝对路径
+            if not os.path.isabs(data_dir):
+                data_dir = os.path.join(self.data_root, data_dir)
+            base_data_dir = data_dir
+
+            pcap_paths = self._collect_pcaps(data_dir, max_pcaps)
+            if not pcap_paths:
+                raise RuntimeError(f"No valid PCAP files found in '{data_dir}'")
+
+            full_trace = self._load_trace(protocol, pcap_paths)
+
+            if mode == "pcap+synthetic":
+                desired = min(120, max_sessions)
+                sessions_existing = _group_sessions(full_trace)
+                need = max(0, desired - len(sessions_existing))
+                n_synth = int(synthetic_sessions) if int(synthetic_sessions) > 0 else need
+                if n_synth > 0:
+                    sessions_synth = generate_synthetic_sessions(
+                        protocol=protocol,
+                        n_sessions=n_synth,
+                        session_len=int(synthetic_session_len),
+                        seed=seed + 999,
+                    )
+                    events: List[MessageEvent] = list(full_trace.events)
+                    for evs in sessions_synth.values():
+                        events.extend(evs)
+                    events.sort(key=lambda e: e.timestamp)
+                    full_trace = Trace(events=events)
         train_sessions, _, train_keys = self._split_sessions(full_trace, seed, test_ratio, max_sessions)
         train_sessions = self._cap_session_events(train_sessions, max_events_per_session)
         train_trace = Trace(events=[ev for key in train_keys for ev in train_sessions[key]])
         pefsm, cf, df = self._train_pefsm(train_trace, train_sessions)
+        prune_info = self._maybe_prune_pefsm(
+            pefsm=pefsm,
+            prune_mode=prune_mode,
+            prune_percentile=prune_percentile,
+        )
         model_json = self.serializer.serialize_model(pefsm, protocol.upper())
         metrics = self._build_metrics(
             protocol=protocol,
-            data_dir=data_dir,
+            data_dir=base_data_dir,
             pcap_paths=pcap_paths,
             max_pcaps=max_pcaps,
             max_sessions=max_sessions,
             test_ratio=test_ratio,
             seed=seed,
+            dataset_mode=mode,
+            synthetic_sessions=int(synthetic_sessions),
+            synthetic_session_len=int(synthetic_session_len),
+            sessions_all=_group_sessions(full_trace) if mode != "pcap" else None,
         )
 
         artifact_id = uuid.uuid4().hex[:12]
         artifact = LearnedArtifact(
             artifact_id=artifact_id,
             protocol=protocol.upper(),
-            data_dir=data_dir,
+            data_dir=base_data_dir,
             pefsm=pefsm,
             train_trace=train_trace,
             control_flow_pipeline=cf,
@@ -157,8 +245,10 @@ class VisualizationService:
 
         return {
             "artifact_id": artifact_id,
-            "pcap_files": [os.path.basename(path) for path in pcap_paths],
+            "pcap_files": [os.path.basename(path) for path in pcap_paths] if pcap_paths else [],
+            "dataset_mode": mode,
             "training_profile": profile,
+            "prune": prune_info,
             "effective_limits": {
                 "max_pcaps": max_pcaps,
                 "max_sessions": max_sessions,
@@ -168,6 +258,41 @@ class VisualizationService:
             "replay": self.serializer.serialize_replay(self.replay_builder.build(pefsm, train_trace)),
             "metrics": metrics,
         }
+
+    @staticmethod
+    def _percentile_threshold(values: List[float], percentile: int) -> float:
+        if not values:
+            return 0.0
+        xs = sorted(values)
+        p = max(0, min(99, int(percentile)))
+        idx = max(0, min(len(xs) - 1, int((p / 100) * (len(xs) - 1))))
+        return float(xs[idx])
+
+    def _maybe_prune_pefsm(
+        self,
+        pefsm: PEFSM,
+        prune_mode: str,
+        prune_percentile: int,
+    ) -> Dict:
+        mode = (prune_mode or "none").strip().lower()
+        if mode in {"none", "off", "false", "0"}:
+            return {"mode": "none", "enabled": False}
+
+        before = len(pefsm.transitions)
+        if before <= 0:
+            return {"mode": "none", "enabled": False}
+
+        if mode == "count":
+            threshold = int(self._percentile_threshold([float(t.traverse_count or 0) for t in pefsm.transitions], prune_percentile))
+            res = pefsm.prune_transitions(min_count=threshold, min_prob=None, combine="or", preserve_end_reachability=True)
+            return {"mode": "count", "enabled": True, "percentile": int(prune_percentile), "min_count": int(threshold), **res}
+
+        if mode == "prob":
+            threshold = self._percentile_threshold([float(t.prob or 0.0) for t in pefsm.transitions], prune_percentile)
+            res = pefsm.prune_transitions(min_count=None, min_prob=float(threshold), combine="or", preserve_end_reachability=True)
+            return {"mode": "prob", "enabled": True, "percentile": int(prune_percentile), "min_prob": float(threshold), **res}
+
+        return {"mode": "none", "enabled": False}
 
     def _resolve_training_limits(
         self,
@@ -255,6 +380,10 @@ class VisualizationService:
         max_sessions: int,
         test_ratio: float,
         seed: int,
+        dataset_mode: str = "pcap",
+        synthetic_sessions: int = 0,
+        synthetic_session_len: int = 20,
+        sessions_all: Optional[Dict[SessionKey, List[MessageEvent]]] = None,
     ) -> Dict:
         proto_upper = protocol.upper()
         if proto_upper not in _LABELERS:
@@ -288,15 +417,38 @@ class VisualizationService:
                 "note": f"No supervised evaluator registered for protocol '{proto_upper}'.",
             }
 
-        eval_result = run_full_evaluation(
-            protocol=proto_upper,
-            data_dir=data_dir,
-            pcap_paths=pcap_paths,
-            seed=seed,
-            test_ratio=test_ratio,
-            max_sessions=max_sessions,
-            max_pcaps=max_pcaps,
-        )
+        mode = (dataset_mode or "pcap").strip().lower()
+        if mode == "pcap":
+            eval_result = run_full_evaluation(
+                protocol=proto_upper,
+                data_dir=data_dir,
+                pcap_paths=pcap_paths,
+                seed=seed,
+                test_ratio=test_ratio,
+                max_sessions=max_sessions,
+                max_pcaps=max_pcaps,
+            )
+        else:
+            labeler = _LABELERS[proto_upper]
+            if mode == "synthetic":
+                desired = min(120, max_sessions)
+                n_synth = int(synthetic_sessions) if int(synthetic_sessions) > 0 else desired
+                sessions_all = generate_synthetic_sessions(
+                    protocol=proto_upper,
+                    n_sessions=n_synth,
+                    session_len=int(synthetic_session_len),
+                    seed=seed,
+                )
+            if sessions_all is None:
+                sessions_all = {}
+            eval_result = run_full_evaluation_from_sessions(
+                protocol=proto_upper,
+                sessions_all=sessions_all,
+                labeler=labeler,
+                seed=seed,
+                test_ratio=test_ratio,
+                max_sessions=max_sessions,
+            )
         enhanced = eval_result.enhanced_efsm or {}
         legacy = eval_result.legacy_efsm or {}
 
@@ -436,8 +588,9 @@ class VisualizationService:
         max_sessions: int,
     ) -> Tuple[Dict[SessionKey, List[MessageEvent]], Dict[SessionKey, List[MessageEvent]], List[SessionKey]]:
         sessions_all = _group_sessions(trace)
-        if len(sessions_all) < 4:
-            sessions_all = _split_long_sessions(sessions_all)
+        desired_min_sessions = min(120, max_sessions)
+        if len(sessions_all) < desired_min_sessions:
+            sessions_all = _split_long_sessions(sessions_all, target_sessions=desired_min_sessions)
         keys = list(sessions_all.keys())
         if len(keys) > max_sessions:
             rng = random.Random(seed)
@@ -454,9 +607,10 @@ class VisualizationService:
             test_key = SessionKey(
                 ip1=only_key.ip1,
                 port1=only_key.port1,
-                ip2=f"{only_key.ip2}#test",
+                ip2=only_key.ip2,
                 port2=only_key.port2,
                 protocol=only_key.protocol,
+                segment_id=int(getattr(only_key, "segment_id", 0)) + 1,
             )
             test_evs = [
                 MessageEvent(

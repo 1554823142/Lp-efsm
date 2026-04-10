@@ -9,7 +9,7 @@ class CrossMessageLearner:
         self,
         r2_threshold: float = 0.999,        # 线性推导规则的接受门槛
         residual_tol: float = 1e-4,         # 两类规则的精度容差
-        min_samples: int = 8,               # 学习任何规则所需的最少配对样本数(避免误判)
+        min_samples: int = 4,               # 学习任何规则所需的最少配对样本数(避免误判)
         delta_tolerance: float = 1e-6,      # 序列递增规则的步长一致性判断
     ):
         self.r2_threshold = r2_threshold
@@ -38,7 +38,7 @@ class CrossMessageLearner:
         # s-前缀（如 s0, s2）是全局静态常量（值恒为某固定值，如 0），
         # 作为 src 变量时会与任何恰好值也为 0 的 dst 变量产生假恒等规则。
         # direction/entropy/len 是协议无关的衍生特征，不应参与跨消息规则学习。
-        _SKIP_PREFIX = ("s", "dyn_", "b")
+        _SKIP_PREFIX = ("s",)
         _SKIP_VARS = {"direction", "entropy", "len"}
         src_names = {
             n for n in src_names
@@ -207,4 +207,3 @@ class CrossMessageLearner:
 
         r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 1e-12 else 1.0
         return k, c, r2
-

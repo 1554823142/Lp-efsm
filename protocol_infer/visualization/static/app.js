@@ -53,20 +53,30 @@ function fillProtocolSelect(rows) {
 
 function getRowsFromDatasetItems(items) {
   if (!items || !items.length) return FALLBACK_PROTOCOL_ROWS;
-  return items.map((item) => ({
-    folderName: item.name,
-    protocol: inferProtocolFromDatasetFolderName(item.name) || String(item.name).toUpperCase(),
-  }));
+  const seen = new Set();
+  const rows = [];
+  items.forEach((item) => {
+    const proto = item.protocol || inferProtocolFromDatasetFolderName(item.name) || String(item.name).toUpperCase();
+    if (!proto || seen.has(proto)) return;
+    seen.add(proto);
+    rows.push({
+      folderName: item.name,
+      protocol: proto,
+    });
+  });
+  return rows.length ? rows : FALLBACK_PROTOCOL_ROWS;
 }
 
 const state = {
   artifactId: null,
   model: null,
+  viewModel: null,
   metrics: null,
   replay: { steps: [], summary: {} },
   currentStep: 0,
   timer: null,
   cy: null,
+  view: { level: 'full', percentile: 70 },
 };
 
 const el = {
@@ -75,8 +85,14 @@ const el = {
   maxPcapsInput: document.getElementById('maxPcapsInput'),
   maxSessionsInput: document.getElementById('maxSessionsInput'),
   profileSelect: document.getElementById('profileSelect'),
+  pruneModeSelect: document.getElementById('pruneModeSelect'),
+  prunePercentileInput: document.getElementById('prunePercentileInput'),
+  prunePercentileLabel: document.getElementById('prunePercentileLabel'),
   testRatioInput: document.getElementById('testRatioInput'),
   seedInput: document.getElementById('seedInput'),
+  viewLevelSelect: document.getElementById('viewLevelSelect'),
+  edgePercentileInput: document.getElementById('edgePercentileInput'),
+  edgePercentileLabel: document.getElementById('edgePercentileLabel'),
   learnBtn: document.getElementById('learnBtn'),
   uploadBtn: document.getElementById('uploadBtn'),
   pcapFileInput: document.getElementById('pcapFileInput'),
@@ -119,16 +135,22 @@ async function loadDatasets() {
     const option = document.createElement('option');
     option.value = item.path;
     option.dataset.folderName = item.name;
-    option.textContent = `${item.name}  (${item.path})`;
-    if (item.name.toUpperCase() === 'MODBUS') {
-      option.selected = true;
-    }
+    option.dataset.protocol = item.protocol || inferProtocolFromDatasetFolderName(item.name) || String(item.name).toUpperCase();
+    option.dataset.mode = item.mode || 'pcap';
+    option.textContent = item.label || `${item.name}  (${item.path})`;
     el.datasetSelect.appendChild(option);
   });
 
   if (!data.items.length) {
     el.protocolSelect.selectedIndex = 0;
   } else {
+    for (let i = 0; i < el.datasetSelect.options.length; i++) {
+      const opt = el.datasetSelect.options[i];
+      if (opt.dataset.protocol === 'MODBUS' && opt.dataset.mode === 'pcap+synthetic') {
+        el.datasetSelect.selectedIndex = i;
+        break;
+      }
+    }
     syncProtocolSelectToDataset();
   }
 }
@@ -137,26 +159,41 @@ async function loadDatasets() {
 function syncProtocolSelectToDataset() {
   const dsOpt = el.datasetSelect.options[el.datasetSelect.selectedIndex];
   if (!dsOpt) return;
-  const folder = dsOpt.dataset.folderName || dsOpt.textContent.split(/\s+\(/)[0].trim();
-  for (let i = 0; i < el.protocolSelect.options.length; i++) {
-    if (el.protocolSelect.options[i].dataset.folderName === folder) {
-      el.protocolSelect.selectedIndex = i;
-      return;
-    }
-  }
+  const proto = dsOpt.dataset.protocol || inferProtocolFromDatasetFolderName(dsOpt.dataset.folderName) || el.protocolSelect.value;
+  if (proto) el.protocolSelect.value = proto;
+  applyDatasetModeDefaults();
 }
 
 /** 协议下拉变更时，选中同名数据集目录（若存在） */
 function syncDatasetFromProtocol() {
   const pOpt = el.protocolSelect.options[el.protocolSelect.selectedIndex];
   if (!pOpt) return;
-  const folder = pOpt.dataset.folderName;
-  if (!folder) return;
-  for (let i = 0; i < el.datasetSelect.options.length; i++) {
-    if (el.datasetSelect.options[i].dataset.folderName === folder) {
-      el.datasetSelect.selectedIndex = i;
-      return;
+  const proto = pOpt.value;
+  if (!proto) return;
+  const modes = ['pcap+synthetic', 'pcap', 'synthetic'];
+  for (let m = 0; m < modes.length; m++) {
+    for (let i = 0; i < el.datasetSelect.options.length; i++) {
+      const opt = el.datasetSelect.options[i];
+      if (opt.dataset.protocol === proto && opt.dataset.mode === modes[m]) {
+        el.datasetSelect.selectedIndex = i;
+        applyDatasetModeDefaults();
+        return;
+      }
     }
+  }
+}
+
+function applyDatasetModeDefaults() {
+  const dsOpt = el.datasetSelect.options[el.datasetSelect.selectedIndex];
+  if (!dsOpt) return;
+  const mode = dsOpt.dataset.mode || 'pcap';
+  if (mode !== 'pcap' && el.profileSelect) {
+    el.profileSelect.value = 'fast';
+    applyProfileDefaults();
+  }
+  const ms = Number(el.maxSessionsInput.value || 0);
+  if (!Number.isFinite(ms) || ms < 120) {
+    el.maxSessionsInput.value = '120';
   }
 }
 
@@ -223,10 +260,15 @@ function renderGraph(model) {
     state.cy.destroy();
   }
 
+  const nodeCount = (model.nodes || []).length;
+  const layout = nodeCount > 250
+    ? { name: 'breadthfirst', directed: true, spacingFactor: 1.2, padding: 10 }
+    : { name: 'dagre', rankDir: 'LR', nodeSep: 36, rankSep: 80 };
+
   state.cy = cytoscape({
     container: document.getElementById('cy'),
     elements,
-    layout: { name: 'dagre', rankDir: 'LR', nodeSep: 36, rankSep: 80 },
+    layout,
     style: [
       {
         selector: 'node',
@@ -352,6 +394,152 @@ function renderGraph(model) {
   });
 }
 
+function calcCountThreshold(edges, percentile) {
+  const vals = edges.map((e) => Number(e.data && e.data.count) || 0).sort((a, b) => a - b);
+  if (!vals.length) return 0;
+  const p = Math.max(0, Math.min(99, Number(percentile) || 0));
+  const idx = Math.max(0, Math.min(vals.length - 1, Math.floor((p / 100) * (vals.length - 1))));
+  return vals[idx];
+}
+
+function computeViewModel(fullModel, level, percentile) {
+  if (!fullModel) return null;
+  const nodes = fullModel.nodes || [];
+  const edges = fullModel.edges || [];
+  const startId = (fullModel.summary && fullModel.summary.start_state) || null;
+  const startNodeId = startId || (nodes.find((n) => n.data && n.data.is_start) || {}).data?.id || null;
+  const endIds = new Set(nodes.filter((n) => n.data && n.data.is_end).map((n) => n.data.id));
+
+  if (level === 'full') {
+    return {
+      nodes,
+      edges,
+      summary: {
+        ...(fullModel.summary || {}),
+        view_level: 'full',
+        view_states: nodes.length,
+        view_transitions: edges.length,
+      },
+    };
+  }
+
+  const threshold = calcCountThreshold(edges, percentile);
+  const keptEdges = edges.filter((e) => (Number(e.data && e.data.count) || 0) >= threshold);
+  const nodeIds = new Set();
+  keptEdges.forEach((e) => {
+    nodeIds.add(e.data.source);
+    nodeIds.add(e.data.target);
+  });
+  const keptNodes = nodes.filter((n) => nodeIds.has(n.data.id));
+
+  if (level === 'freq') {
+    return {
+      nodes: keptNodes,
+      edges: keptEdges,
+      summary: {
+        ...(fullModel.summary || {}),
+        view_level: `freq_p${percentile}`,
+        edge_count_threshold: threshold,
+        view_states: keptNodes.length,
+        view_transitions: keptEdges.length,
+      },
+    };
+  }
+
+  if (!startNodeId || !endIds.size) {
+    return {
+      nodes: keptNodes,
+      edges: keptEdges,
+      summary: {
+        ...(fullModel.summary || {}),
+        view_level: `backbone_p${percentile}`,
+        edge_count_threshold: threshold,
+        view_states: keptNodes.length,
+        view_transitions: keptEdges.length,
+      },
+    };
+  }
+
+  const adj = new Map();
+  const radj = new Map();
+  keptEdges.forEach((e) => {
+    const s = e.data.source;
+    const t = e.data.target;
+    if (!adj.has(s)) adj.set(s, []);
+    if (!radj.has(t)) radj.set(t, []);
+    adj.get(s).push(t);
+    radj.get(t).push(s);
+  });
+
+  const reachFromStart = new Set();
+  const q1 = [startNodeId];
+  while (q1.length) {
+    const cur = q1.shift();
+    if (reachFromStart.has(cur)) continue;
+    reachFromStart.add(cur);
+    const outs = adj.get(cur) || [];
+    outs.forEach((nxt) => {
+      if (!reachFromStart.has(nxt)) q1.push(nxt);
+    });
+  }
+
+  const canReachEnd = new Set();
+  const q2 = Array.from(endIds);
+  while (q2.length) {
+    const cur = q2.shift();
+    if (canReachEnd.has(cur)) continue;
+    canReachEnd.add(cur);
+    const ins = radj.get(cur) || [];
+    ins.forEach((pre) => {
+      if (!canReachEnd.has(pre)) q2.push(pre);
+    });
+  }
+
+  const backboneNodes = nodes.filter((n) => reachFromStart.has(n.data.id) && canReachEnd.has(n.data.id));
+  const backboneIds = new Set(backboneNodes.map((n) => n.data.id));
+  const backboneEdges = keptEdges.filter((e) => backboneIds.has(e.data.source) && backboneIds.has(e.data.target));
+
+  if (!backboneEdges.length && keptEdges.length) {
+    return {
+      nodes: keptNodes,
+      edges: keptEdges,
+      summary: {
+        ...(fullModel.summary || {}),
+        view_level: `freq_p${percentile}`,
+        edge_count_threshold: threshold,
+        view_states: keptNodes.length,
+        view_transitions: keptEdges.length,
+      },
+    };
+  }
+
+  return {
+    nodes: backboneNodes,
+    edges: backboneEdges,
+    summary: {
+      ...(fullModel.summary || {}),
+      view_level: `backbone_p${percentile}`,
+      edge_count_threshold: threshold,
+      view_states: backboneNodes.length,
+      view_transitions: backboneEdges.length,
+    },
+  };
+}
+
+function applyGraphView() {
+  if (!state.model) return;
+  const level = (el.viewLevelSelect && el.viewLevelSelect.value) || state.view.level || 'full';
+  const percentile = Number((el.edgePercentileInput && el.edgePercentileInput.value) || state.view.percentile || 70);
+  state.view = { level, percentile };
+  if (el.edgePercentileLabel) {
+    el.edgePercentileLabel.textContent = `边频率阈值（百分位）：${percentile}`;
+  }
+  state.viewModel = computeViewModel(state.model, level, percentile) || state.model;
+  renderGraph(state.viewModel);
+  renderSummary(state.viewModel.summary || {});
+  highlightStep(state.replay.steps[state.currentStep]);
+}
+
 function renderReplayTable() {
   el.replayTable.innerHTML = '';
   state.replay.steps.forEach((step, index) => {
@@ -439,14 +627,20 @@ async function learnModel() {
   form.set('profile', el.profileSelect.value || 'balanced');
   form.set('test_ratio', el.testRatioInput.value);
   form.set('seed', el.seedInput.value);
+  const dsOpt = el.datasetSelect.options[el.datasetSelect.selectedIndex];
+  const mode = (dsOpt && dsOpt.dataset.mode) || 'pcap';
+  form.set('dataset_mode', mode);
+  form.set('synthetic_sessions', '0');
+  form.set('synthetic_session_len', '20');
+  form.set('prune_mode', (el.pruneModeSelect && el.pruneModeSelect.value) || 'none');
+  form.set('prune_percentile', (el.prunePercentileInput && el.prunePercentileInput.value) || '70');
 
   const data = await fetchJSON('/api/learn', { method: 'POST', body: form });
   state.artifactId = data.artifact_id;
   state.model = data.model;
   state.metrics = data.metrics || null;
   state.replay = data.replay;
-  renderGraph(state.model);
-  renderSummary(state.model.summary);
+  applyGraphView();
   renderMetrics(state.metrics);
   el.timelineInput.max = String(Math.max(0, state.replay.steps.length - 1));
   setCurrentStep(0);
@@ -486,6 +680,19 @@ function bindEvents() {
   el.protocolSelect.addEventListener('change', () => syncDatasetFromProtocol());
   if (el.profileSelect) {
     el.profileSelect.addEventListener('change', applyProfileDefaults);
+  }
+  if (el.viewLevelSelect) {
+    el.viewLevelSelect.addEventListener('change', () => applyGraphView());
+  }
+  if (el.edgePercentileInput) {
+    el.edgePercentileInput.addEventListener('input', () => applyGraphView());
+  }
+  if (el.prunePercentileInput) {
+    el.prunePercentileInput.addEventListener('input', () => {
+      if (el.prunePercentileLabel) {
+        el.prunePercentileLabel.textContent = `剪枝阈值（百分位）：${el.prunePercentileInput.value}`;
+      }
+    });
   }
   el.learnBtn.addEventListener('click', () => learnModel().catch((err) => setStatus(err.message)));
   el.uploadBtn.addEventListener('click', () => uploadPcap().catch((err) => setStatus(err.message)));

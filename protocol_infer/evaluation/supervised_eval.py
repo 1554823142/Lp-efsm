@@ -232,8 +232,9 @@ def _split_keys(keys: List[SessionKey], test_ratio: float, seed: int) -> Tuple[L
 
 def _split_long_sessions(
     sessions: Dict[SessionKey, List[MessageEvent]],
-    target_sessions: int = 12,
-    min_chunk_len: int = 12,
+    target_sessions: int = 120,
+    min_chunk_len: int = 4,
+    idle_timeout_s: float = 2.0,
 ) -> Dict[SessionKey, List[MessageEvent]]:
     # 工业数据集常只有 1~2 条长 TCP 链接，若不切分则 train/test 样本极度匮乏
     # 即使 session 数量 > 4，如果平均长度很大，也建议切分
@@ -245,41 +246,102 @@ def _split_long_sessions(
     if total_events <= len(sessions):
         return sessions
 
-    desired_chunk = max(min_chunk_len, total_events // target_sessions)
+    desired_chunk = max(min_chunk_len, total_events // target_sessions) if target_sessions > 0 else max(min_chunk_len, total_events)
     expanded: Dict[SessionKey, List[MessageEvent]] = {}
 
-    for sk, evs in sessions.items():
-        if len(evs) < desired_chunk * 2:
-            expanded[sk] = evs
-            continue
+    def rekey_events(new_key: SessionKey, chunk: List[MessageEvent]) -> List[MessageEvent]:
+        return [
+            MessageEvent(
+                session_key=new_key,
+                timestamp=ev.timestamp,
+                payload=ev.payload,
+                direction=ev.direction,
+            )
+            for ev in chunk
+        ]
 
-        chunk_index = 0
+    def split_by_idle(evs: List[MessageEvent]) -> List[List[MessageEvent]]:
+        if idle_timeout_s <= 0 or len(evs) < min_chunk_len * 2:
+            return [evs]
+        parts: List[List[MessageEvent]] = []
+        cur: List[MessageEvent] = [evs[0]]
+        for prev, ev in zip(evs, evs[1:]):
+            gap = float(ev.timestamp) - float(prev.timestamp)
+            if gap > idle_timeout_s and len(cur) >= min_chunk_len:
+                parts.append(cur)
+                cur = [ev]
+            else:
+                cur.append(ev)
+        if cur:
+            parts.append(cur)
+        merged: List[List[MessageEvent]] = []
+        for part in parts:
+            if merged and len(part) < min_chunk_len:
+                merged[-1].extend(part)
+            else:
+                merged.append(part)
+        return merged if merged else [evs]
+
+    def split_by_len(evs: List[MessageEvent]) -> List[List[MessageEvent]]:
+        if len(evs) <= desired_chunk * 2:
+            return [evs]
+        chunks: List[List[MessageEvent]] = []
         start = 0
         while start < len(evs):
             end = min(len(evs), start + desired_chunk)
             chunk = evs[start:end]
-            if len(chunk) < min_chunk_len and expanded:
-                last_key = next(reversed(expanded))
-                expanded[last_key].extend(chunk)
+            if chunks and len(chunk) < min_chunk_len:
+                chunks[-1].extend(chunk)
                 break
+            chunks.append(chunk)
+            start = end
+        return chunks if chunks else [evs]
+
+    for sk, evs in sessions.items():
+        parts = []
+        for part in split_by_idle(evs):
+            parts.extend(split_by_len(part))
+
+        if len(parts) <= 1:
+            expanded[sk] = evs
+            continue
+
+        base = int(getattr(sk, "segment_id", 0)) * 100000
+        for chunk_index, chunk in enumerate(parts):
             chunk_key = SessionKey(
                 ip1=sk.ip1,
                 port1=sk.port1,
-                ip2=f"{sk.ip2}#chunk{chunk_index}",
+                ip2=sk.ip2,
                 port2=sk.port2,
                 protocol=sk.protocol,
+                segment_id=base + chunk_index,
             )
-            expanded[chunk_key] = [
-                MessageEvent(
-                    session_key=chunk_key,
-                    timestamp=ev.timestamp,
-                    payload=ev.payload,
-                    direction=ev.direction,
+            expanded[chunk_key] = rekey_events(chunk_key, chunk)
+
+    if target_sessions > 0 and len(expanded) < target_sessions:
+        deficit = target_sessions - len(expanded)
+        window_len = max(2, min_chunk_len)
+        ordered_sources = sorted(sessions.items(), key=lambda kv: len(kv[1]), reverse=True)
+        for sk, evs in ordered_sources:
+            if deficit <= 0:
+                break
+            if len(evs) < window_len:
+                continue
+            base = int(getattr(sk, "segment_id", 0)) * 100000
+            n_windows = max(1, len(evs) - window_len + 1)
+            for i in range(deficit):
+                start = i % n_windows
+                win = evs[start:start + window_len]
+                win_key = SessionKey(
+                    ip1=sk.ip1,
+                    port1=sk.port1,
+                    ip2=sk.ip2,
+                    port2=sk.port2,
+                    protocol=sk.protocol,
+                    segment_id=base + 80000 + i,
                 )
-                for ev in chunk
-            ]
-            chunk_index += 1
-            start = end
+                expanded[win_key] = rekey_events(win_key, win)
+            deficit = target_sessions - len(expanded)
 
     return expanded
 
@@ -330,9 +392,9 @@ def _edges_from_sequences(seqs: Dict[SessionKey, List[str]]) -> Tuple[set, set]:
 def _build_symbol_sequences(
     cf: ControlFlowPipeline,
     sessions: Dict[SessionKey, List[MessageEvent]],
-) -> Tuple[Dict[SessionKey, List[str]], List[Tuple[str, str]]]:
+) -> Tuple[Dict[SessionKey, List[str]], List[Tuple[SessionKey, str]]]:
     seqs: Dict[SessionKey, List[str]] = {}
-    flat_pairs: List[Tuple[str, str]] = []
+    flat_pairs: List[Tuple[SessionKey, str]] = []
     for sk, evs in sessions.items():
         feats = cf.featureer.extract(evs)
         syms = [cf.abstractor.abstract(f) for f in feats]
@@ -425,9 +487,10 @@ def evaluate_protocol_pcaps(
         test_key = SessionKey(
             ip1=only_key.ip1,
             port1=only_key.port1,
-            ip2=f"{only_key.ip2}#test",
+            ip2=only_key.ip2,
             port2=only_key.port2,
             protocol=only_key.protocol,
+            segment_id=int(getattr(only_key, "segment_id", 0)) + 1,
         )
         test_evs = [
             MessageEvent(session_key=test_key, timestamp=e.timestamp, payload=e.payload, direction=e.direction)

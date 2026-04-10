@@ -170,7 +170,7 @@ class DynamicFieldDetector:
                     if component_positions.issubset(explained):
                         continue
 
-                    for endian in ("big", "little"):
+                    for endian in ("big",):
                         values = self._extract_multi(payloads, pos, width, endian)
                         if len(values) < self.min_samples:
                             continue
@@ -193,6 +193,31 @@ class DynamicFieldDetector:
             for key, field in detected.items()
             if field.width == 1 or not field.covers.issubset(fully_explained)
         }
+
+        # 端序去重：同一 (pos,width) 同时检测到 big/little 时，仅保留一个。
+        # 为了展示/推断一致性，这里全局只保留 big-endian（网络字节序）。
+        by_window: Dict[Tuple[int, int], List[Tuple[Tuple[int, int, str], DynamicField]]] = {}
+        for key, field in detected.items():
+            by_window.setdefault((field.start_pos, field.width), []).append((key, field))
+
+        pruned: Dict[Tuple[int, int, str], DynamicField] = {}
+        for (pos, width), items in by_window.items():
+            if width == 1 or len(items) == 1:
+                for k, f in items:
+                    pruned[k] = f
+                continue
+
+            best_key = None
+            for k, f in items:
+                if f.endian == "big":
+                    best_key = k
+                    break
+            if best_key is None:
+                best_key = items[0][0]
+
+            pruned[best_key] = detected[best_key]
+
+        detected = pruned
 
         return list(detected.values())
 

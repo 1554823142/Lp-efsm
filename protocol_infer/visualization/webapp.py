@@ -49,6 +49,11 @@ def learn(
     profile: str = Form("balanced"),
     test_ratio: float = Form(0.2),
     seed: int = Form(42),
+    dataset_mode: str = Form("pcap"),
+    synthetic_sessions: int = Form(0),
+    synthetic_session_len: int = Form(20),
+    prune_mode: str = Form("none"),
+    prune_percentile: int = Form(70),
 ) -> dict:
     try:
         return service.learn_from_dataset(
@@ -59,6 +64,11 @@ def learn(
             profile=profile,
             test_ratio=test_ratio,
             seed=seed,
+            dataset_mode=dataset_mode,
+            synthetic_sessions=synthetic_sessions,
+            synthetic_session_len=synthetic_session_len,
+            prune_mode=prune_mode,
+            prune_percentile=prune_percentile,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

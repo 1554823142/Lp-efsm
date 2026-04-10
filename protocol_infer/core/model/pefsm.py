@@ -1,5 +1,7 @@
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
+import math
+import heapq
 import random
 
 from protocol_infer.core.model.efsm import EFSM, MemoryContext
@@ -66,6 +68,172 @@ class PEFSM(EFSM):
                 prob = tran.traverse_count / total
                 confidence = self.assess_confidence(tran.traverse_count, total)
                 self.set_transition_stats(tran, tran.traverse_count, prob, confidence)
+
+    def prune_transitions(
+        self,
+        min_count: Optional[int] = None,
+        min_prob: Optional[float] = None,
+        combine: str = "or",
+        preserve_end_reachability: bool = True,
+    ) -> Dict[str, int]:
+        if self.start_state is None or not self.transitions:
+            return {"before_transitions": len(self.transitions), "after_transitions": len(self.transitions)}
+
+        combine = (combine or "or").strip().lower()
+        if combine not in {"or", "and"}:
+            combine = "or"
+
+        all_transitions = list(self.transitions)
+        by_src: Dict[int, List[Transition]] = defaultdict(list)
+        out_srcs = set()
+        for t in all_transitions:
+            by_src[t.src].append(t)
+            out_srcs.add(t.src)
+
+        end_states = {sid for sid, st in self.states.items() if getattr(st, "is_end", False)}
+        if not end_states:
+            end_states = {sid for sid in self.states.keys() if sid not in out_srcs}
+        if not end_states:
+            end_states = {self.start_state}
+
+        def keep_by_rule(t: Transition) -> bool:
+            conds = []
+            if min_count is not None:
+                conds.append(int(t.traverse_count) >= int(min_count))
+            if min_prob is not None:
+                conds.append(float(t.prob or 0.0) >= float(min_prob))
+            if not conds:
+                return True
+            return all(conds) if combine == "and" else any(conds)
+
+        keep_ids = {t.id for t in all_transitions if keep_by_rule(t)}
+
+        if preserve_end_reachability:
+            def reachable_ids(kept: set) -> set:
+                seen = set()
+                q = [self.start_state]
+                kept_by_src: Dict[int, List[Transition]] = defaultdict(list)
+                for t in all_transitions:
+                    if t.id in kept:
+                        kept_by_src[t.src].append(t)
+                while q:
+                    cur = q.pop()
+                    if cur in seen:
+                        continue
+                    seen.add(cur)
+                    for t in kept_by_src.get(cur, []):
+                        if t.dst not in seen:
+                            q.append(t.dst)
+                return seen
+
+            def best_path_edges(start: int, goal: int) -> List[Transition]:
+                dist: Dict[int, float] = {start: 0.0}
+                prev: Dict[int, Tuple[int, Transition]] = {}
+                heap = [(0.0, start)]
+                while heap:
+                    d, u = heapq.heappop(heap)
+                    if d != dist.get(u, 0.0):
+                        continue
+                    if u == goal:
+                        break
+                    for t in by_src.get(u, []):
+                        p = float(t.prob or 0.0)
+                        w = (-math.log(max(p, 1e-12))) + (1.0 / (float(t.traverse_count) + 1.0))
+                        nd = d + w
+                        if nd < dist.get(t.dst, float("inf")):
+                            dist[t.dst] = nd
+                            prev[t.dst] = (u, t)
+                            heapq.heappush(heap, (nd, t.dst))
+                if goal not in prev and goal != start:
+                    return []
+                path: List[Transition] = []
+                cur = goal
+                while cur != start:
+                    item = prev.get(cur)
+                    if item is None:
+                        return []
+                    u, t = item
+                    path.append(t)
+                    cur = u
+                path.reverse()
+                return path
+
+            reachable = reachable_ids(keep_ids)
+            for end in sorted(end_states):
+                if end in reachable:
+                    continue
+                path = best_path_edges(self.start_state, end)
+                if not path:
+                    continue
+                for t in path:
+                    keep_ids.add(t.id)
+                reachable = reachable_ids(keep_ids)
+
+            if end_states and not (end_states & reachable):
+                fallback_end = max(end_states, key=lambda sid: getattr(self.states.get(sid), "visit_count", 0))
+                path = best_path_edges(self.start_state, fallback_end)
+                for t in path:
+                    keep_ids.add(t.id)
+
+        kept_transitions = [t for t in all_transitions if t.id in keep_ids]
+
+        for st in self.states.values():
+            st.transitions = []
+        self.transitions = []
+        self._by_state_input = {}
+        for t in kept_transitions:
+            self._register_transition(t)
+
+        keep_tid = {t.id for t in kept_transitions}
+        self._transition_guards = {k: v for k, v in self._transition_guards.items() if k in keep_tid}
+        self._transition_actions = {k: v for k, v in self._transition_actions.items() if k in keep_tid}
+
+        self.compute_probabilities()
+        if self.start_state is not None:
+            adj: Dict[int, List[int]] = defaultdict(list)
+            incident = set()
+            for t in self.transitions:
+                adj[t.src].append(t.dst)
+                incident.add(t.src)
+                incident.add(t.dst)
+
+            reachable = set()
+            stack = [self.start_state]
+            while stack:
+                cur = stack.pop()
+                if cur in reachable:
+                    continue
+                reachable.add(cur)
+                for nxt in adj.get(cur, []):
+                    if nxt not in reachable:
+                        stack.append(nxt)
+
+            keep_states = set()
+            for sid, st in self.states.items():
+                if sid not in reachable:
+                    continue
+                if getattr(st, "is_start", False) or getattr(st, "is_end", False) or sid in incident:
+                    keep_states.add(sid)
+            if self.start_state in reachable:
+                keep_states.add(self.start_state)
+
+            if keep_states:
+                self.states = {sid: st for sid, st in self.states.items() if sid in keep_states}
+                kept2 = [t for t in self.transitions if t.src in keep_states and t.dst in keep_states]
+
+                for st in self.states.values():
+                    st.transitions = []
+                self.transitions = []
+                self._by_state_input = {}
+                for t in kept2:
+                    self._register_transition(t)
+
+                keep_tid2 = {t.id for t in kept2}
+                self._transition_guards = {k: v for k, v in self._transition_guards.items() if k in keep_tid2}
+                self._transition_actions = {k: v for k, v in self._transition_actions.items() if k in keep_tid2}
+                self.compute_probabilities()
+
+        return {"before_transitions": len(all_transitions), "after_transitions": len(self.transitions)}
 
     def get_transition_probability(self, src: int, dst: int, symbol: Optional[str] = None) -> float:
         for tran in self.transitions:
