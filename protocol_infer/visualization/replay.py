@@ -185,7 +185,7 @@ class ReplayBuilder:
             # 这能提升复杂协议在测试集上的重放率，避免因 Guard 学习不全导致的 0 准确率。
             matched = chosen is not None and dst is not None and new_vars is not None
             
-            # 为了区分“严格匹配”和“重同步匹配”，我们引入一个新标志
+            # 为了区分“严格匹配”和“重同步匹配”，引入一个新标志
             is_strict = strict_matched and matched and guard_ok
             
             if matched:
@@ -245,6 +245,9 @@ def summarize_replay_by_session(steps: List[ReplayStep]) -> Dict[str, Any]:
 
     sessions_total = 0
     sessions_full_match = 0
+    sessions_state_match = 0
+    sessions_strict_match = 0
+    session_state_step_rates: List[float] = []
     for _sess, slist in by_session.items():
         if not slist:
             continue
@@ -253,20 +256,35 @@ def summarize_replay_by_session(steps: List[ReplayStep]) -> Dict[str, Any]:
         # 这能真实反映状态机对协议主流程的捕捉能力，而不受数据流过拟合的干扰。
         if all(x.matched for x in slist):
             sessions_full_match += 1
+        if all(x.matched and x.note != "state_resynced_by_symbol" for x in slist):
+            sessions_state_match += 1
+        if all(x.is_strict for x in slist):
+            sessions_strict_match += 1
+        state_ok = sum(1 for x in slist if x.matched and x.note != "state_resynced_by_symbol")
+        session_state_step_rates.append(state_ok / len(slist) if slist else 0.0)
 
     steps_total = len(steps)
     steps_matched = sum(1 for s in steps if s.matched)
+    steps_state = sum(1 for s in steps if s.matched and s.note != "state_resynced_by_symbol")
     steps_strict = sum(1 for s in steps if s.is_strict)
     steps_resynced = sum(1 for s in steps if s.note == "state_resynced_by_symbol")
 
     return {
-        "session_replay_accuracy": (
-            sessions_full_match / sessions_total if sessions_total else 0.0
+        "session_replay_accuracy": (sessions_full_match / sessions_total if sessions_total else 0.0),
+        "session_state_replay_accuracy": (sessions_state_match / sessions_total if sessions_total else 0.0),
+        "session_strict_replay_accuracy": (sessions_strict_match / sessions_total if sessions_total else 0.0),
+        "session_state_step_match_rate": (
+            (sum(session_state_step_rates) / len(session_state_step_rates)) if session_state_step_rates else 0.0
         ),
         "sessions_full_replay_ok": float(sessions_full_match),
+        "sessions_state_replay_ok": float(sessions_state_match),
+        "sessions_strict_replay_ok": float(sessions_strict_match),
         "sessions_replay_evaluated": float(sessions_total),
         "step_replay_accuracy": (steps_matched / steps_total if steps_total else 0.0),
+        "step_state_replay_accuracy": (steps_state / steps_total if steps_total else 0.0),
+        "step_strict_replay_accuracy": (steps_strict / steps_total if steps_total else 0.0),
         "steps_matched": float(steps_matched),
+        "steps_state": float(steps_state),
         "steps_strict": float(steps_strict),
         "steps_total": float(steps_total),
         "steps_resynced": float(steps_resynced),

@@ -162,7 +162,7 @@ class EFSMEvalResult:
 # ---------------------------------------------------------------------------
 
 # guard/action 函数体中的通用局部变量名，不代表协议字段，排除
-_GENERIC_FUNC_NAMES: Set[str] = frozenset({
+_GENERIC_FUNC_NAMES = frozenset({
     "vars", "vars_dict", "mem", "mem_data", "result", "new_vars",
     "name", "val", "ctype", "vmin", "vmax", "constraint",
     "ante_vars", "ante_vals", "cons_vars", "cons_vals",

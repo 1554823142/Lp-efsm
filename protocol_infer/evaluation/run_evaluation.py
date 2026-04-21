@@ -171,7 +171,7 @@ def run_full_evaluation_from_sessions(
 ) -> FullEvalResult:
     proto_upper = protocol.upper()
 
-    desired_min_sessions = min(120, max_sessions)
+    desired_min_sessions = int(max_sessions)
     if len(sessions_all) < desired_min_sessions:
         sessions_all = _split_long_sessions(sessions_all, target_sessions=desired_min_sessions)
 

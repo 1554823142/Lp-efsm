@@ -191,9 +191,11 @@ class PEFSM(EFSM):
         self.compute_probabilities()
         if self.start_state is not None:
             adj: Dict[int, List[int]] = defaultdict(list)
+            radj: Dict[int, List[int]] = defaultdict(list)
             incident = set()
             for t in self.transitions:
                 adj[t.src].append(t.dst)
+                radj[t.dst].append(t.src)
                 incident.add(t.src)
                 incident.add(t.dst)
 
@@ -208,14 +210,30 @@ class PEFSM(EFSM):
                     if nxt not in reachable:
                         stack.append(nxt)
 
+            explicit_ends = {sid for sid, st in self.states.items() if getattr(st, "is_end", False)}
+            can_reach_end = set()
+            if explicit_ends:
+                q = [sid for sid in explicit_ends if sid in reachable]
+                while q:
+                    cur = q.pop()
+                    if cur in can_reach_end:
+                        continue
+                    can_reach_end.add(cur)
+                    for pre in radj.get(cur, []):
+                        if pre in reachable and pre not in can_reach_end:
+                            q.append(pre)
+
             keep_states = set()
-            for sid, st in self.states.items():
-                if sid not in reachable:
-                    continue
-                if getattr(st, "is_start", False) or getattr(st, "is_end", False) or sid in incident:
-                    keep_states.add(sid)
-            if self.start_state in reachable:
-                keep_states.add(self.start_state)
+            if explicit_ends:
+                keep_states = reachable & can_reach_end
+            else:
+                for sid, st in self.states.items():
+                    if sid not in reachable:
+                        continue
+                    if getattr(st, "is_start", False) or getattr(st, "is_end", False) or sid in incident:
+                        keep_states.add(sid)
+                if self.start_state in reachable:
+                    keep_states.add(self.start_state)
 
             if keep_states:
                 self.states = {sid: st for sid, st in self.states.items() if sid in keep_states}

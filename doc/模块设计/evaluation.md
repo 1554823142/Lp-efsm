@@ -1,91 +1,99 @@
-# 协议逆向工程评价指标体系
+# 评价指标
 
-> 评估策略：将已知协议（Modbus / IEC 60870-104 / DNP3）当作未知协议，以官方规范为 Ground Truth 进行有监督评估。
+指标主要集中与这几个维度进行评估系统:
 
-## 已知协议选取
+- 端到端行为可重放能力（Replayability）
 
-| 协议            | 行业领域     | 结构类型             | 状态复杂度        | 主要挑战点                       |
-| :-------------- | :----------- | :------------------- | :---------------- | :------------------------------- |
-| **Modbus TCP**  | 通用工业     | 简单请求-响应        | 无状态            | 功能码与数据边界的映射           |
-| **S7COMM**      | 制造业 (PLC) | 多层嵌套             | 高 (面向连接)     | 多层协议栈解构、参数块变长       |
-| **DNP3**        | 电力/水务    | 链路层+传输层+应用层 | 中 (支持主动上报) | 对象头变体、链路层确认机制       |
-| **IEC 104**     | 电力         | 定界符+控制域+ASDU   | 中 (带滑动窗口)   | I帧序列号确认机制、ASDU类型识别  |
-| **EtherNet/IP** | 离散制造     | 面向对象 (CIP)       | 中高 (会话管理)   | CIP路径解析、封装报文与CIP的嵌套 |
-| **MQTT**        | 工业物联网   | 二进制头部+UTF-8负载 | 低 (连接会话)     | 剩余长度编码、主题解析           |
+- 状态机结构正确性（Structural Fidelity）
 
-------
+- 约束规则语义准确性（Constraint Correctness）
 
-## 阶段一：字段边界检测
+不采用传统的"是否到达终态"的二值评估方法:
 
-| 指标               | 计算方式      | 使用原因                                       |
-| ------------------ | ------------- | ---------------------------------------------- |
-| Boundary Precision | `             | 检测∩真实                                      |
-| Boundary Recall    | `             | 检测∩真实                                      |
-| Boundary F1        | `2PR / (P+R)` | 综合平衡，本场景 Recall 权重应略高于 Precision |
+流量捕获/分段不完整, 有可能不是完整的起始--终止态, 并且如果一个guard出现误判, 则会导致整个会话被拒绝, 要求过于严格, 所以采用粗略整体, 再考虑局部, 并允许部分断链的评估思想进行评估
 
+## 端到端重放与结构匹配指标 (Replay & Behavioral Metrics)
 
+此类指标通过在测试集上按步执行“回放（Replay）”，验证推断出的模型对真实流量的在线跟踪与接受能力。
 
-------
+匹配一共分为三种层级:(也可以理解为不同等级的严格标准)
 
-## 阶段二：消息聚类（DBSCAN）
+| 类型                        | 条件                           | 含义               |
+| --------------------------- | ------------------------------ | ------------------ |
+| Replay Match                | 能找到任意可执行边             | 能解释行为（宽松） |
+| **State Match（结构匹配）** | 当前状态可直接转移（无重同步） | **状态机结构正确** |
+| Strict Match                | 状态 + Guard 均正确            | 完全正确           |
 
-### 有监督指标（利用已知标签）
+### Session Full Match Rate (会话平均匹配率)
+- **含义**：衡量“状态机结构对会话主流程的贴合程度”。对每个会话，严格统计能在**当前状态合法找到后续转移的“步数占比”**（不计入全局重同步），然后对所有会话取**平均值**。
 
-| 指标      | 计算方式                             | 使用原因                                         |
-| --------- | ------------------------------------ | ------------------------------------------------ |
-| ARI       | `(RI - E[RI]) / (max(RI) - E[RI])`   | 不依赖标签编号，修正随机期望，对类别不平衡不敏感 |
-| NMI       | `2I(U;V) / [H(U)+H(V)]`              | 衡量聚类与真实标签的互信息，适合跨参数比较       |
-| V-measure | `2×Homogeneity×Completeness / (H+C)` | 能分别诊断过度分裂与过度合并两种错误模式         |
+  解释**模型在不同会话上是否稳定**
 
-### 无监督指标（调参 / 真实部署场景）
+- **代码实现位置**：
+  
+  - **类/方法**：`protocol_infer/visualization/replay.py` -> `summarize_replay_by_session()` 方法中计算。
+  - **字段名**：`session_state_step_match_rate`
+  
+- 计算流程:
 
-| 指标                 | 计算方式                      | 使用原因                                             |
-| -------------------- | ----------------------------- | ---------------------------------------------------- |
-| Silhouette Score     | `(b(i)-a(i)) / max(a,b)` 均值 | 不依赖标签，用于调整 DBSCAN 的 eps / min_samples     |
-| Davies-Bouldin Index | `(1/k)Σmax[(σi+σj)/d]`        | 对不规则簇形状更鲁棒，越低越好                       |
-| Noise Ratio          | `噪声点数 / 总消息数`         | DBSCAN 特有，建议控制在 < 5%，噪声过多会产生无效状态 |
+  - 所有回放步骤按session分桶
+  - 逐个session计算结构匹配率(统计该session总步数, 统计结构匹配的步数(需要保证不是Replay Match), 计算匹配率)
+  - 对所有的session取平均
 
-------
+  伪代码:
 
-## 阶段三：FSM 构建
+  ```python
+  for each session:
+      state_ok = sum(结构匹配步数)
+      rate = state_ok / len(session_steps)
+      收集 rate
+  
+  最终结果 = 平均(rate)
+  ```
 
-| 指标                 | 计算方式                                | 使用原因                                      |
-| -------------------- | --------------------------------------- | --------------------------------------------- |
-| State Match Rate     | `|S_pred ∩ S_true| / |S_pred ∪ S_true|` | 衡量协议会话阶段识别是否正确                  |
-| Transition Precision | `|E_pred ∩ E_true| / |E_pred|`          | 防止多边（接受非法流量）                      |
-| Transition Recall    | `|E_pred ∩ E_true| / |E_true|`          | 防止漏边（拒绝合法流量）                      |
-| Transition F1        | `2PR / (P+R)`                           | 综合衡量迁移结构准确性                        |
-| Trace Coverage       | `可接受 trace 数 / 总 trace 数`         | 最贴近实用性，衡量 FSM 对真实流量的处理能力   |
-| GED（归一化）        | `GED(G_pred, G_true) / max(|G1|,|G2|)`  | 客观量化与标准 FSM 的结构差距，与状态编号无关 |
+### Message Match Accuracy (消息级结构匹配率)
+- **含义**：**消息级别**的**整体匹配准确率**。计算方式为 `(全体消息步里：严格在当前状态匹配到转移的步数) / (总步数)`。
 
-------
+  反映**模型整体能解释多少行为**
 
-## 阶段四：EFSM 构建
+- **代码实现位置**：
+  
+  - **类/方法**：`protocol_infer/visualization/replay.py` -> `summarize_replay_by_session()` 方法中计算。
+  - **字段名**：`step_state_replay_accuracy`
+  
+- 计算流程:
 
-### Guard 评估
+  ```python
+  steps_state = sum(结构匹配步数)
+  steps_total = 总步数
+  
+  accuracy = steps_state / steps_total
+  ```
 
-| 指标            | 计算方式       | 使用原因                                         |
-| --------------- | -------------- | ------------------------------------------------ |
-| Guard Precision | `TP / (TP+FP)` | 衡量误放行非法报文的比例                         |
-| Guard Recall    | `TP / (TP+FN)` | 衡量合法报文被误拒的比例                         |
-| Guard F1        | `2PR / (P+R)`  | 综合评分，需构造负样本（篡改字段值）才能有效评估 |
+### Steps Resynced (重同步步数)
+- **含义**：回放中发生“当前状态无路可走，被迫全局搜索图中其他同 Symbol 边进行重同步”的次数。
+- **代码实现位置**：
+  - **类/方法**：`protocol_infer/visualization/replay.py` -> `summarize_replay_by_session()` 方法中计算。
+  - **字段名**：`steps_resynced`
 
-### Action 评估（按变量类型）
+### Sessions Evaluated / Steps Total (评估样本量)
+- **含义**：参与回放统计的会话数量与总消息步数。
+- **代码实现位置**：
+  - **类/方法**：`protocol_infer/visualization/replay.py` -> `summarize_replay_by_session()` 方法中计算。
+  - **字段名**：`sessions_replay_evaluated` 和 `steps_total`
 
-| 变量类型   | 指标                      | 原因                 |
-| ---------- | ------------------------- | -------------------- |
-| continuous | MAE `(1/n)Σ|pred-actual|` | 预测偏差有大小之分   |
-| sequential | Step Accuracy             | 只需验证步长是否正确 |
-| discrete   | Exact Match Rate          | 没有"接近"的概念     |
-| constant   | 无需评估                  | action 恒为 keep     |
+---
 
-### 端到端评估
+## 2. 约束规则辅助指标 (Guard PRF)
 
-| 指标                  | 计算方式                              | 使用原因                                        |
-| --------------------- | ------------------------------------- | ----------------------------------------------- |
-| Trace Replay Accuracy | `完整重放成功 trace 数 / 总 trace 数` | 唯一能发现 Guard 与 Action 组件间链式错误的指标 |
-| FAR                   | `误接受异常流量数 / 总异常流量数`     | 安全场景下衡量漏报攻击的比例                    |
-| FRR                   | `误拒合法流量数 / 总合法流量数`       | 衡量误报正常业务的比例                          |
+此类指标需要预先定义好协议的真实规范（Ground Truth），主要用于辅助判断学习到的约束规则是否符合规范语义。
 
-> **注**：Trace Replay Acc ≤ Trace Coverage。若两者差距大，说明问题出在 Guard/Action 而非 FSM 结构。FAR 与 FRR 存在 trade-off，工业控制场景建议优先控制 FAR < 5%。
+### 2.1 Guard Precision / Guard Recall / Guard F1
+- **含义**：将推断出的 Guard 字段集（推断模型中用于分支判断的变量集合）与真实规范字段集做交并比计算，得到字段级别的精确率、召回率与 F1 值。
+- **代码实现位置**：
+  - **类/方法**：`protocol_infer/evaluation/efsm_evaluator.py` -> `GuardFieldEvaluator.evaluate()` 方法。
+  - **字段名**：`guard_precision`, `guard_recall`, `guard_f1`
 
+---
+
+*注：上述所有前端展示指标的聚合与最终接口返回逻辑，均由 `protocol_infer/visualization/service.py` 中的 `VisualizationService._build_metrics()` 方法统一负责处理映射与封装。*

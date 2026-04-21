@@ -187,10 +187,6 @@ function applyDatasetModeDefaults() {
   const dsOpt = el.datasetSelect.options[el.datasetSelect.selectedIndex];
   if (!dsOpt) return;
   const mode = dsOpt.dataset.mode || 'pcap';
-  if (mode !== 'pcap' && el.profileSelect) {
-    el.profileSelect.value = 'fast';
-    applyProfileDefaults();
-  }
   const ms = Number(el.maxSessionsInput.value || 0);
   if (!Number.isFinite(ms) || ms < 120) {
     el.maxSessionsInput.value = '120';
@@ -290,6 +286,9 @@ function renderGraph(model) {
         style: {
           'shape': 'round-rectangle',
           'background-color': '#d8efe9',
+          'border-width': 6,
+          'border-color': '#0f766e',
+          'border-style': 'double',
         },
       },
       {
@@ -297,6 +296,9 @@ function renderGraph(model) {
         style: {
           'shape': 'diamond',
           'background-color': '#f7d8ce',
+          'border-width': 6,
+          'border-color': '#b91c1c',
+          'border-style': 'double',
         },
       },
       {

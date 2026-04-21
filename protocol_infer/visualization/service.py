@@ -133,19 +133,23 @@ class VisualizationService:
             )
         return results
 
+
+    '''
+
+    '''
     def learn_from_dataset(
         self,
-        protocol: str,
-        data_dir: str,
-        max_pcaps: int = 6,
-        max_sessions: int = 200,
-        profile: str = "balanced",
-        test_ratio: float = 0.2,
+        protocol: str,          # 协议名，如 "MODBUS"
+        data_dir: str,          # PCAP 文件目录
+        max_pcaps: int = 6,     # 最多读几个 pcap 文件
+        max_sessions: int = 200,# 最多用几个会话训练
+        profile: str = "balanced",  # fast / balanced / thorough
+        test_ratio: float = 0.2,    # 测试集比例
         seed: int = 42,
-        dataset_mode: str = "pcap",
+        dataset_mode: str = "pcap", # pcap / synthetic / pcap+synthetic
         synthetic_sessions: int = 0,
         synthetic_session_len: int = 20,
-        prune_mode: str = "none",
+        prune_mode: str = "none",   # 剪枝模式
         prune_percentile: int = 70,
     ) -> Dict:
         max_pcaps, max_sessions, max_events_per_session, profile = self._resolve_training_limits(
@@ -161,9 +165,10 @@ class VisualizationService:
         pcap_paths: List[str] = []
         base_data_dir = data_dir
 
+
+        # 三条路径
         if mode == "synthetic":
-            desired = min(120, max_sessions)
-            n_synth = int(synthetic_sessions) if int(synthetic_sessions) > 0 else desired
+            n_synth = int(synthetic_sessions) if int(synthetic_sessions) > 0 else int(max_sessions)
             sessions_all = generate_synthetic_sessions(
                 protocol=protocol,
                 n_sessions=n_synth,
@@ -189,9 +194,8 @@ class VisualizationService:
             full_trace = self._load_trace(protocol, pcap_paths)
 
             if mode == "pcap+synthetic":
-                desired = min(120, max_sessions)
                 sessions_existing = _group_sessions(full_trace)
-                need = max(0, desired - len(sessions_existing))
+                need = max(0, int(max_sessions) - len(sessions_existing))       # 还需要补充的session个数
                 n_synth = int(synthetic_sessions) if int(synthetic_sessions) > 0 else need
                 if n_synth > 0:
                     sessions_synth = generate_synthetic_sessions(
@@ -209,13 +213,13 @@ class VisualizationService:
         train_sessions = self._cap_session_events(train_sessions, max_events_per_session)
         train_trace = Trace(events=[ev for key in train_keys for ev in train_sessions[key]])
         pefsm, cf, df = self._train_pefsm(train_trace, train_sessions)
-        prune_info = self._maybe_prune_pefsm(
+        prune_info = self._maybe_prune_pefsm(               # 按概率剪枝, 减少噪声
             pefsm=pefsm,
             prune_mode=prune_mode,
-            prune_percentile=prune_percentile,
+            prune_percentile=prune_percentile
         )
         model_json = self.serializer.serialize_model(pefsm, protocol.upper())
-        metrics = self._build_metrics(
+        metrics = self._build_metrics(              # 计算评估指标
             protocol=protocol,
             data_dir=base_data_dir,
             pcap_paths=pcap_paths,
@@ -229,8 +233,8 @@ class VisualizationService:
             sessions_all=_group_sessions(full_trace) if mode != "pcap" else None,
         )
 
-        artifact_id = uuid.uuid4().hex[:12]
-        artifact = LearnedArtifact(
+        artifact_id = uuid.uuid4().hex[:12]         # 随机数
+        artifact = LearnedArtifact(                 # 结构体打包模型和数据
             artifact_id=artifact_id,
             protocol=protocol.upper(),
             data_dir=base_data_dir,
@@ -243,7 +247,7 @@ class VisualizationService:
         )
         self._artifacts[artifact_id] = artifact
 
-        return {
+        return {                                    # 把序列化后的状态机、回放结果、评估指标一起返回给调用方
             "artifact_id": artifact_id,
             "pcap_files": [os.path.basename(path) for path in pcap_paths] if pcap_paths else [],
             "dataset_mode": mode,
@@ -386,7 +390,7 @@ class VisualizationService:
         sessions_all: Optional[Dict[SessionKey, List[MessageEvent]]] = None,
     ) -> Dict:
         proto_upper = protocol.upper()
-        if proto_upper not in _LABELERS:
+        if proto_upper not in _LABELERS:            # 仅考虑注册的协议
             return {
                 "dataset": {
                     "protocol": proto_upper,
@@ -472,8 +476,8 @@ class VisualizationService:
                 return default
 
         core_metrics: Dict[str, float] = {
-            "session_full_match_rate": _replay_float("session_replay_accuracy"),
-            "message_match_accuracy": _replay_float("step_replay_accuracy"),
+            "session_full_match_rate": _replay_float("session_state_step_match_rate", _replay_float("session_state_replay_accuracy", _replay_float("session_replay_accuracy"))),
+            "message_match_accuracy": _replay_float("step_state_replay_accuracy", _replay_float("step_replay_accuracy")),
             "sessions_evaluated": _replay_float("sessions_replay_evaluated"),
             "steps_total": _replay_float("steps_total"),
             "steps_resynced": _replay_float("steps_resynced"),
@@ -501,10 +505,11 @@ class VisualizationService:
             "core_metrics": core_metrics,
             "metrics_notes": {
                 "primary_zh": (
-                    "【主指标】session_replay_accuracy = 完整重放成功的会话数 / 参与评估的会话数"
-                    "（该会话内每一步都能在已学习的 PEFSM 上匹配转移并走通；与页面回放逻辑一致）。"
+                    "【主指标】session_full_match_rate 为会话平均匹配率：对每个会话统计“在当前状态匹配到转移”的步占比，再对会话取平均。"
+                    "（不计入全局按 symbol 重同步；Guard 违规会被标记但不影响该主指标，避免 Guard 学习不稳定导致指标全为 0 或全为 1。）"
+                    "另外 session_replay_accuracy 为更宽容版本：允许按 symbol 全局重同步，更接近“是否能走通主流程”。"
                     "replay_eval_on 表示该指标是在 test 集还是 train 集上算的。"
-                    "step_replay_accuracy = 匹配成功的消息步数 / 总步数。"
+                    "message_match_accuracy 同理取状态级版本（step_state_replay_accuracy）。"
                     "steps_resynced 表示通过“同 symbol 全局重同步”恢复状态的步数。"
                 ),
                 "guard_reference_zh": (
@@ -588,7 +593,7 @@ class VisualizationService:
         max_sessions: int,
     ) -> Tuple[Dict[SessionKey, List[MessageEvent]], Dict[SessionKey, List[MessageEvent]], List[SessionKey]]:
         sessions_all = _group_sessions(trace)
-        desired_min_sessions = min(120, max_sessions)
+        desired_min_sessions = int(max_sessions)
         if len(sessions_all) < desired_min_sessions:
             sessions_all = _split_long_sessions(sessions_all, target_sessions=desired_min_sessions)
         keys = list(sessions_all.keys())
