@@ -108,7 +108,7 @@ class StaticFieldInterpreter(ResultInterpreter[List[FrozenSet]]):
         core = AprioriCore()
 
         global_static_items = set(self.last_global_static_items)
-        global_static_items.update({
+        global_static_items.update({                # 出现频率超过阈值(95%)则视为全局静态字段(相当于常数), 聚类时不考虑
             next(iter(fs))
             for fs, sup in frequent_itemsets
             if len(fs) == 1 and sup >= self.global_static_threshold
@@ -162,9 +162,9 @@ class StaticFieldMiner:
         if hasattr(self.builder, "fit"):
             self.builder.fit(events)
 
-        transactions = self.builder.build(events)
+        transactions = self.builder.build(events)           #  事件 → {(pos, val), ...}
         transactions = self._prune_global_static_items(transactions)
-        fis = self.core.frequent_itemsets(transactions, self.min_support)
+        fis = self.core.frequent_itemsets(transactions, self.min_support)       # 运用Apriori算法
         return self.interpreter.interpret(fis)
 
     def get_global_static_items(self) -> FrozenSet[Any]:

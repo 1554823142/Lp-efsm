@@ -58,7 +58,7 @@ class AprioriFeatureExtraction(FeatureExtractor):
             interpreter=StaticFieldInterpreter(global_static_threshold=global_static_threshold),
             min_support=min_support,
         )
-        mined_itemsets = cls._mine_multiview_itemsets(
+        mined_itemsets = cls._mine_multiview_itemsets(          # 挖掘频繁项集
             miner=miner,
             events_all=mining_events,
             min_subset_size=max(24, min(128, len(mining_events) // 10 if mining_events else 24)),
@@ -66,7 +66,7 @@ class AprioriFeatureExtraction(FeatureExtractor):
         static_items = cls._extract_static_items(miner.get_global_static_items())
         static_positions = set(static_items.keys())
 
-        positions = cls._rank_positions(
+        positions = cls._rank_positions(            # 利用频繁项集得到的静态字段位置
             events_all=mining_events,
             mined_itemsets=mined_itemsets,
             max_positions=max_positions,
@@ -131,7 +131,7 @@ class AprioriFeatureExtraction(FeatureExtractor):
         def absorb(events_subset: List[MessageEvent]) -> None:
             if not events_subset:
                 return
-            for fs, support in miner.mine(events_subset):
+            for fs, support in miner.mine(events_subset):           # 频繁项集挖掘
                 weighted = support * (len(events_subset) / total)
                 prev = merged.get(fs, 0.0)
                 if weighted > prev:
@@ -153,14 +153,14 @@ class AprioriFeatureExtraction(FeatureExtractor):
         cls,
         events_all: List[MessageEvent],
         mined_itemsets: List[Tuple[FrozenSet[Tuple[int, int]], float]],
-        max_positions: int,
-        scan_positions: int,
-        seed_positions: Optional[List[int]] = None,
-        excluded_positions: Optional[set[int]] = None,
+        max_positions: int,             # 最终要保留的位置数
+        scan_positions: int,            # 扫描的范围
+        seed_positions: Optional[List[int]] = None,         # 预处理时基于熵初步筛选的候选, 避免Apriori分数接近时被排除
+        excluded_positions: Optional[set[int]] = None,      # 排除全局静态变量(即常量)
     ) -> List[int]:
         excluded_positions = excluded_positions or set()
         scores: Dict[int, float] = defaultdict(float)
-        for fs, support in mined_itemsets:
+        for fs, support in mined_itemsets:                  #### Apriori挖掘出的项集
             weight = support * max(len(fs), 1)
             for pos, _val in fs:
                 if pos not in excluded_positions:
@@ -169,17 +169,17 @@ class AprioriFeatureExtraction(FeatureExtractor):
         if seed_positions:
             for pos in seed_positions:
                 if pos not in excluded_positions:
-                    scores[pos] += 0.05
+                    scores[pos] += 0.05                 # 获得较小的保底分数
 
         for pos, score in cls._select_informative_positions(events_all, scan_positions):
             if pos not in excluded_positions:
-                scores[pos] += score
+                scores[pos] += score                    # 信息熵加分
 
         if not scores:
             fallback = [p for p in range(min(max_positions, scan_positions)) if p not in excluded_positions]
             return fallback[:max_positions]
 
-        ranked = sorted(scores, key=lambda p: (-scores[p], p))[:max_positions]
+        ranked = sorted(scores, key=lambda p: (-scores[p], p))[:max_positions]          # 取前max_pos
         return sorted(ranked)
 
     @staticmethod
@@ -187,6 +187,7 @@ class AprioriFeatureExtraction(FeatureExtractor):
         events_all: List[MessageEvent],
         scan_positions: int,
     ) -> List[Tuple[int, float]]:
+        """从消息的字节流中，找出那些信息丰富但不完全随机的字节位置，用于后续的特征提取"""
         ranked: List[Tuple[int, float]] = []
         total = max(len(events_all), 1)
         for pos in range(scan_positions):
@@ -208,7 +209,7 @@ class AprioriFeatureExtraction(FeatureExtractor):
                 continue
             max_prob = max(counts.values()) / present
             coverage = present / total
-            score = coverage * (1.0 - max_prob) * (1.0 - unique_ratio)
+            score = coverage * (1.0 - max_prob) * (1.0 - unique_ratio)  # 出现频率 * 分布均匀性 * 规律性(不随机性)
             if score > 0:
                 ranked.append((pos, score))
         ranked.sort(key=lambda item: (-item[1], item[0]))
@@ -312,6 +313,9 @@ class AprioriFeatureExtraction(FeatureExtractor):
         range_ratio_threshold: float,
         candidate_positions: Optional[List[int]] = None,
     ) -> Tuple[List[List[int]], Dict[int, Tuple[int, int]]]:
+        """
+        自动发现载荷中哪些相邻字节属于同一个逻辑字段，然后把它们合并成组
+        """
         values_by_pos: Dict[int, List[int]] = {i: [] for i in range(max_positions)}
         for ev in events_all:
             payload = ev.payload or b""
@@ -321,7 +325,7 @@ class AprioriFeatureExtraction(FeatureExtractor):
 
         byte_bins: Dict[int, Tuple[int, int]] = {}
         ranges: Dict[int, int] = {}
-        for pos, vals in values_by_pos.items():
+        for pos, vals in values_by_pos.items():             # 为了适应于Apriori的离散化处理
             if not vals:
                 byte_bins[pos] = (0, 0)
                 ranges[pos] = 0
@@ -334,8 +338,8 @@ class AprioriFeatureExtraction(FeatureExtractor):
                 t1, t2 = cls._percentiles(sv, [1 / 3, 2 / 3])
                 if t2 < t1:
                     t1, t2 = t2, t1
-            byte_bins[pos] = (t1, t2)
-            ranges[pos] = max(vals) - min(vals)
+            byte_bins[pos] = (t1, t2)           # 三分位阈值，用于把连续字节值离散化为 0/1/2
+            ranges[pos] = max(vals) - min(vals)     # 波动范围
 
         if candidate_positions is None:
             candidate_positions = [p for p in range(max_positions) if values_by_pos[p] and ranges.get(p, 0) > 0]
@@ -353,14 +357,17 @@ class AprioriFeatureExtraction(FeatureExtractor):
                 if i >= len(payload):
                     continue
                 t1, t2 = byte_bins[i]
-                b = cls._discretize(int(payload[i]), t1, t2)
+                b = cls._discretize(int(payload[i]), t1, t2)        # 三分桶的位置
                 items.append((i, b))
             transactions.append(frozenset(items))
 
         core = AprioriCore()
-        fis = core.frequent_itemsets(transactions, min_support=min_support)
-        rules = core.association_rules(fis, min_confidence=min_confidence)
+        fis = core.frequent_itemsets(transactions, min_support=min_support)     # 频繁项集
+        rules = core.association_rules(fis, min_confidence=min_confidence)      # 关联规则
 
+        """
+            使用并查集合并
+        """
         parent: Dict[int, int] = {p: p for p in candidate_positions}
 
         def find(x: int) -> int:
@@ -375,6 +382,9 @@ class AprioriFeatureExtraction(FeatureExtractor):
                 parent[rb] = ra
 
         def ok_pair(i: int, j: int) -> bool:
+            """
+                取值范围匹配检查, 只有两个位置的波动幅度在同一量级时才合并
+            """
             if not enable_range_confirmation:
                 return True
             ri = ranges.get(i, 0)
@@ -384,26 +394,30 @@ class AprioriFeatureExtraction(FeatureExtractor):
                 return True
             return min(ri, rj) <= overall * range_ratio_threshold
 
-        for ante, cons, _sup, _conf in rules:
-            ante_pos = {p for p, _v in ante}
-            cons_pos = {p for p, _v in cons}
+        for ante, cons, _sup, _conf in rules:           # A->B
+            ante_pos = {p for p, _v in ante}            # 规则左侧位置集合{A}
+            cons_pos = {p for p, _v in cons}            # 规则右侧位置集合{B}
             for p in ante_pos:
                 for q in cons_pos:
+                    # 1. 字段相邻   2. 取指范围匹配
                     if p in candidate_set and q in candidate_set and abs(p - q) == 1 and ok_pair(p, q):
-                        union(p, q)
+                        union(p, q)                     # 合并
 
         groups: Dict[int, List[int]] = {}
         for i in candidate_positions:
             r = find(i)
-            groups.setdefault(r, []).append(i)
+            groups.setdefault(r, []).append(i)      # 把每个根节点下的所有位置收集起来
 
-        field_groups = [sorted(g) for g in groups.values() if len(g) >= 2]
-        field_groups.sort(key=lambda g: (-len(g), g[0]))
+        field_groups = [sorted(g) for g in groups.values() if len(g) >= 2]  # 只保留 至少 2 个位置 的分组，单个孤立位置不算"字段组"
+        field_groups.sort(key=lambda g: (-len(g), g[0]))        # 按照组长度(即大字段) 和首位置升序进行排序
         field_groups = field_groups[:max_groups]
         return field_groups, byte_bins
 
     @staticmethod
     def _field_group_feature(payload: bytes, group: List[int]) -> float:
+        """
+            把关联的字节位置哈希压缩成[0,1]的浮点数
+        """
         if not payload:
             return 0.0
         acc = 0
