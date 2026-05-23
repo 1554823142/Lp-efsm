@@ -81,10 +81,14 @@ class AprioriCore:
     def maximal_itemsets(
         self, frequent_itemsets: List[Tuple[FrozenSet[Any], float]]
     ) -> List[Tuple[FrozenSet[Any], float]]:   # 返回值类型改为携带支持度
+        """
+            频繁项集中选出最大的频繁子集
+            一个频繁项集是"最大"的，当且仅当它的所有超集都不是频繁项集
+        """
 
         # 同时保留支持度，构建 (fs, support) 的排序列表
         support_map = {fs: sup for fs, sup in frequent_itemsets}
-        sets_sorted = sorted(support_map.keys(), key=lambda x: len(x), reverse=True)
+        sets_sorted = sorted(support_map.keys(), key=lambda x: len(x), reverse=True)    # 按长度排序
 
         maximal: List[Tuple[FrozenSet[Any], float]] = []
 

@@ -138,7 +138,7 @@ class DynamicFieldDetector:
             if scan_limit == 0:
                 continue
 
-            # ── 第一趟：单字节扫描 ──────────────────────────────────────
+            # 第一趟：单字节扫描
             # 记录本 symbol 内找到的单字节动态位置，用于后续多字节剪枝
             single_found: Set[int] = set()
 
@@ -150,13 +150,13 @@ class DynamicFieldDetector:
                 if len(values) < self.min_samples:
                     continue
 
-                if self._is_structured(values, bits=8):
+                if self._is_structured(values, bits=8):         # 结构化判断(判断是否为动态变量)
                     key = (pos, 1, "big")
                     if key not in detected:
                         detected[key] = DynamicField(start_pos=pos, width=1, endian="big")
                     single_found.add(pos)
 
-            # ── 第二趟：多字节扫描（width=2, 4）────────────────────────
+            # 第二趟：多字节扫描（width=2, 4）
             if self.max_field_width < 2:
                 continue
 
@@ -263,17 +263,17 @@ class DynamicFieldDetector:
         if len(unique) == 1:
             return False
 
-        # ── 条件1：等差序列 ──────────────────────────────────────────
+        # 条件1：等差序列 
         if n >= 2:
             deltas = [values[i + 1] - values[i] for i in range(n - 1)]
             if max(abs(d - deltas[0]) for d in deltas) < self.sequential_delta_tol:
                 return True
 
-        # ── 条件2：低基数 ───────────────────────────────────────────
+        # 条件2：低基数 
         if len(unique) <= self.low_cardinality_threshold:
             return True
 
-        # ── 条件3：有界范围 ─────────────────────────────────────────
+        # 条件3：有界范围
         span = max(values) - min(values)
         max_possible = float((1 << bits) - 1)
         if span < max_possible * self.bounded_span_ratio:

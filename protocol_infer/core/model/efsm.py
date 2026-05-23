@@ -156,6 +156,9 @@ class EFSM(FSM):
         vars: Dict[str, Any],
         memory: Optional[MemoryContext] = None,
     ) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+        """
+        支持跨转移的共享状态判断
+        """
         candidates: List[Transition] = self._by_state_input.get((sid, symbol), [])
         mem = memory.data if memory is not None else None
 

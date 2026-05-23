@@ -57,7 +57,7 @@ class KTailStateMerger(StateMerger):
                 (symbol, self.signiture_compute(next_sid, k - 1, fsm))
             )
 
-        return tuple(sig)
+        return tuple(sig)       # 返回结果就是当前状态为根, 深度为k的行为树的序列化表示
 
 
     def merge_group(self, group, fsm):

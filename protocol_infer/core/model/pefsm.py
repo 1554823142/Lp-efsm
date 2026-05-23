@@ -76,6 +76,9 @@ class PEFSM(EFSM):
         combine: str = "or",
         preserve_end_reachability: bool = True,
     ) -> Dict[str, int]:
+        """
+        根据统计置信度修剪低质量转移边
+        """
         if self.start_state is None or not self.transitions:
             return {"before_transitions": len(self.transitions), "after_transitions": len(self.transitions)}
 

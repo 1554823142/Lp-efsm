@@ -42,9 +42,6 @@ class DataFlowPipeline:
             learner=guard_action_learner if guard_action_learner is not None else AprioriGuardLearner()
         )                             # 在FSM的基础上学习guard和action
 
-    # ------------------------------------------------------------------
-    # 内部辅助：收集 (event, symbol) 对
-    # ------------------------------------------------------------------
 
     def _collect_ev_sym_pairs(
         self,
@@ -70,9 +67,6 @@ class DataFlowPipeline:
                     pairs.append((ev, symbol))
         return pairs
 
-    # ------------------------------------------------------------------
-    # 内部辅助：动态字段检测并更新 feature_processor
-    # ------------------------------------------------------------------
 
     def _detect_and_update_dynamic_fields(
         self,
@@ -97,17 +91,14 @@ class DataFlowPipeline:
             else self.feature_processor.apriori_positions
         )
         static_positions = set(self.feature_processor.apriori_static_items.keys())
-        base_positions = dyn_positions | static_positions
-        dynamic_fields = detector.detect_from_symbol_groups(
+        base_positions = dyn_positions | static_positions           # 避免重复处理控制流已经发现的位置
+        dynamic_fields = detector.detect_from_symbol_groups(        # 动态变量检测
             symbol_events=dict(symbol_events),
             known_positions=base_positions,
         )
         if dynamic_fields:
             self.feature_processor.update_dynamic_fields(dynamic_fields)
 
-    # ------------------------------------------------------------------
-    # 主流程
-    # ------------------------------------------------------------------
 
     def _prepare_sessions(
         self,
@@ -182,20 +173,20 @@ class DataFlowPipeline:
 
         sessions = self._prepare_sessions(trace, sessions)
 
-        # 1) 构建会话上下文（写入 trace.session_contexts）
+        # 1. 构建会话上下文（写入 trace.session_contexts）
         self.feature_processor.build_session_contexts(trace, sessions)
 
-        # 2) 抽象消息（写入 trace.abstract_messages）
+        # 2. 抽象消息（写入 trace.abstract_messages）
         if self.abstraction_processor.abstractor is not None and (
             self.symbol_featureer is not None or precomputed_sess_features is not None
         ):
-            # ── 第一趟：仅获取 (event, symbol) 对 ──────────────────
+            #  第一趟：仅获取 (event, symbol) 对 
             ev_sym_pairs = self._collect_ev_sym_pairs(sessions, precomputed_sess_features)
 
-            # ── 步骤 2.5：动态字段检测，增量更新 feature_processor ──
+            # 步骤 2.5：动态字段检测，增量更新 feature_processor 
             self._detect_and_update_dynamic_fields(ev_sym_pairs, apriori_positions)
 
-            # ── 第二趟：用更新后的 feature_processor 提取完整变量 ───
+            # 第二趟：用更新后的 feature_processor 提取完整变量
             abstract_msgs = [
                 AbstractMessage(
                     session_key=ev.session_key,
@@ -206,10 +197,12 @@ class DataFlowPipeline:
                 )
                 for ev, sym in ev_sym_pairs
             ]
+
+            # eg: 事件1:  {len: 12, direction: 1, entropy: 0.5, b0: 3, s1: 0, dyn_2_2b: 0,    dyn_4_2b: 10}
             trace.abstract_messages = abstract_msgs
 
-        else:
-            # ── 回退路径：重新训练 abstractor ────────────────────────
+        else:           # 相当于一个保底机制, 如果前面的控制流没有产生聚类模型则只能走这个路径
+            # 回退路径：重新训练 abstractor
             trace = self.abstraction_processor.fit_and_abstract(
                 trace, sessions, self.feature_processor
             )
@@ -230,7 +223,7 @@ class DataFlowPipeline:
                         if ev is not None:
                             msg.vars = self.feature_processor.extract_vars(ev)
 
-        # 3) 构建 EFSM：根据 FSM + 每个会话的变量序列
+        # 3. 构建 EFSM：根据 FSM + 每个会话的变量序列
         sequences: Dict[SessionKey, List[tuple]] = defaultdict(list)
         for ev in trace.abstract_messages:
             sequences[ev.session_key].append((ev.symbol, ev.vars))

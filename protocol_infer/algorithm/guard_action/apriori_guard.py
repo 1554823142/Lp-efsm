@@ -281,7 +281,7 @@ class AprioriGuardLearner(GuardActionLearner):
                     "score": score
                 })
 
-        # 1.2 收集关联规则
+        # 1.2 收集关联规则(使用Apriori)
         joint_rules, joint_rule_means = self._mine_joint_rules(
             var_instances, var_names, var_types
         )
@@ -341,6 +341,13 @@ class AprioriGuardLearner(GuardActionLearner):
         selected_candidates = filtered_candidates[:self.max_guards_per_transition]
         
         # 重新整理选中的约束 (使用原有变量名以保持与评估器兼容)
+        """
+            不同约束的验证逻辑不同:
+            single -> 直接比较值 (eq/in/range)
+            joint -> _check_joint_binding 做柔化匹配
+            linear -> 计算 a = k·b + c 检查残差
+            triplet -> 检查 a + b = c
+        """
         single_constraints: Dict[str, tuple] = {}
         joint_rules: List[tuple] = []
         linear_pairs: List[tuple] = []
@@ -383,7 +390,7 @@ class AprioriGuardLearner(GuardActionLearner):
             # 2. 关联规则验证(A->B)
             for (ante_vars, ante_vals, cons_vars, cons_vals, _conf) in joint_rules:
                 ante_ok = all(
-                    name in vars and _check_binding(
+                    name in vars and _check_binding(            # 验证联合多变量
                         name, vars[name], val, _vtypes, joint_rule_means
                     )
                     for name, val in zip(ante_vars, ante_vals)
@@ -428,6 +435,15 @@ class AprioriGuardLearner(GuardActionLearner):
         """
         计算守卫条件的显著性评分。
         基于“位置重要性”和“区分能力”进行加权。
+
+
+        # _calculate_significance() 评分因素:
+        score = 基础分(1.0 for eq, 0.5 for range)
+        * 位置加成(b0-b7 *5, b8-b15 *3, ...)
+        * 区分能力(symbol_diversity > 1 → 加分)
+        * 符号常量惩罚(全符号相同 → *0.1)
+        * 样本量加成(样本越多分越高)
+        * padding惩罚(eq 0 → *0.4)
         """
         ctype = constraint[0]
         
@@ -504,6 +520,9 @@ class AprioriGuardLearner(GuardActionLearner):
         var_types: Dict[str, str],
         joint_rule_means: Dict[str, float],
     ) -> bool:
+        """
+            输出二值, 将连续类型变量离散化以供Apriori
+        """
         vtype = var_types.get(name)
         if vtype == "continuous":
             mean = joint_rule_means.get(name)
@@ -587,7 +606,7 @@ class AprioriGuardLearner(GuardActionLearner):
         if len(unique_transactions) == 1:
             return [], cached_means
 
-        # 使用Apriori算法挖掘频繁项集合关联规则
+        ########### 使用Apriori算法挖掘频繁项集合关联规则
         try:
             fis = self.core.frequent_itemsets(transactions, self.min_support)       # 频繁项集（support >= min_support）
             rules = self.core.association_rules(fis, self.min_confidence)           # 关联规则（confidence >= min_confidence）

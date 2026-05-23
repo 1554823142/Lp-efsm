@@ -49,6 +49,9 @@ class PEFSMInferencer(ProbTrainer):
         vars_dict: Dict[str, float],
         memory: MemoryContext,
     ) -> Dict[str, float]:
+        """
+        执行转移的 action, 更新变量字典和 memory
+        """
         if tran.action is None:
             return vars_dict.copy()
         try:
@@ -68,11 +71,13 @@ class PEFSMInferencer(ProbTrainer):
             high_ratio=self.high_ratio,
         )
 
+        # 初始化
         for tran in pefsm.transitions:
             tran.traverse_count = 0
             tran.prob = None
             tran.confidence = None
 
+        # 会话回放
         for _, pairs in sequences.items():
             current_state = pefsm.start_state
             if current_state is None:

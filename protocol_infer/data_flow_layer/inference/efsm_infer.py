@@ -62,7 +62,7 @@ class EFSMInferencer:
                 current_state = tran.dst
                 prev_vars = vars_dict       # 记录上一条消息
 
-        # 全局统计：识别会话相关和计数器变量
+        # 全局统计：识别会话相关(单会话恒定, 跨会话不同)和计数器变量, 加入黑名单变量
         volatile_vars = set()
         counter_vars = set()
         if len(sequences) > 1:
@@ -112,7 +112,7 @@ class EFSMInferencer:
             name: len(vals) for name, vals in global_var_values.items()
         }
         
-        # 符号级多样性：反映变量在该 Symbol 下的判别能力
+        # 符号级多样性：反映变量在该 Symbol 下的判别能力, 计算变量出现多少种不同的取值
         var_symbol_diversity = {}
         for symbol, vars_map in symbol_var_values.items():
             var_symbol_diversity[symbol] = {
@@ -130,8 +130,8 @@ class EFSMInferencer:
         for symbol, vars_map in symbol_global_vars.items():
             symbol_constants[symbol] = {}
             for var_name, values in vars_map.items():
-                if len(values) == 1:
-                    symbol_constants[symbol][var_name] = next(iter(values))
+                if len(values) == 1:            # 变量上只有一个值, 即全局常量
+                    symbol_constants[symbol][var_name] = next(iter(values)) # == list(values)[0]
 
         # 准备待处理的任务数据
         tasks = []
@@ -164,6 +164,7 @@ class EFSMInferencer:
             if base_guard is None and base_action is None and memory_guard is None:
                 return tran, None, None
 
+            # 以闭包的形式注册到EFSM
             def wrapped_guard(
                 vars: Dict[str, float],
                 memory=None,

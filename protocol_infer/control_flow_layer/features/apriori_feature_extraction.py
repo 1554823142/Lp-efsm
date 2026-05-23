@@ -13,7 +13,7 @@ class AprioriFeatureExtraction(FeatureExtractor):
     def __init__(
         self,
         positions: List[int],
-        itemsets: List[FrozenSet[Tuple[int, int]]],
+        itemsets: List[FrozenSet[Tuple[int, int]]],     # 取前max_itemsets个频繁项集
         field_groups: Optional[List[List[int]]] = None,
         static_items: Optional[Dict[int, int]] = None,
         max_payload_len: float = 1.0,
@@ -243,8 +243,8 @@ class AprioriFeatureExtraction(FeatureExtractor):
         for pos in self.positions:
             vars_dict[f"b{pos}"] = float(payload[pos]) / 255.0 if pos < len(payload) else 0.0
 
-        # 2. 项集 One-hot
-        for i, fs in enumerate(self.itemsets):
+        # 2. 项集 One-hot, 检查频繁项集与当前事件的载荷字节值是否相同
+        for i, fs in enumerate(self.itemsets):          # 遍历频繁项集
             matched = all(p < len(payload) and payload[p] == v for p, v in fs)
             vars_dict[f"onehot_{i}"] = self.onehot_weight if matched else 0.0
 
